@@ -27,6 +27,7 @@ class MediaFile(Base):
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     frame_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     codec: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    probe_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class VideoMetricSnapshot(Base):
