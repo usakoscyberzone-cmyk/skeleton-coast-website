@@ -14,7 +14,6 @@ def test_normalize_metrics_calculates_rates_and_converts_google_percentages_to_r
         "video_id": "abc123",
         "views": 422,
         "impressions": 5000,
-        "ctr": 7.1,
         "watch_minutes": 480.0,
         "avg_view_duration_seconds": 68.0,
         "average_percentage_viewed": 42.8,
@@ -35,7 +34,7 @@ def test_normalize_metrics_calculates_rates_and_converts_google_percentages_to_r
     result = normalize_metrics(raw)
 
     assert result.subscriber_conversion_rate == 5 / 422
-    assert result.ctr == 0.071
+    assert result.ctr is None
     assert result.average_percentage_viewed == 0.428
     assert result.browse_share is None
     assert result.suggested_share == 57.6 / 69.6

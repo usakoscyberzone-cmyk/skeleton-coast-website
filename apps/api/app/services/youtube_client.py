@@ -3,12 +3,17 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 import hashlib, json, re
+from google.auth.exceptions import RefreshError
+from googleapiclient.errors import HttpError
 
 YOUTUBE_SCOPES=["https://www.googleapis.com/auth/youtube.readonly","https://www.googleapis.com/auth/yt-analytics.readonly"]
 AGGREGATE_METRICS="views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,subscribersGained"
 class YouTubeAuthorizationRequired(RuntimeError): pass
 class YouTubeOAuthStateError(RuntimeError): pass
 class YouTubeApiError(RuntimeError): pass
+class YouTubeQuotaError(YouTubeApiError): pass
+class YouTubeTransientError(YouTubeApiError): pass
+class YouTubeTokenChanged(YouTubeAuthorizationRequired): pass
 @dataclass(frozen=True)
 class ChannelIdentity: channel_id:str; title:str; uploads_playlist_id:str
 @dataclass(frozen=True)
@@ -46,15 +51,20 @@ class YouTubeClient:
   found={}
   for n in range(0,len(ids),50): found.update({x["id"]:x for x in api.videos().list(part="snippet,contentDetails",id=",".join(ids[n:n+50])).execute().get("items",[])})
   return [self._video(found[i]) for i in ids if i in found]
- def fetch_video_metrics(self,video_id,start_date,end_date):
+ def fetch_video_metrics(self,video_id: str,start_date: str,end_date: str) -> RawVideoMetrics:
   common={"ids":"channel==MINE","startDate":start_date,"endDate":end_date,"filters":f"video=={video_id}"}; api=self._analytics(); a=self._query(api,**common,metrics=AGGREGATE_METRICS); t=self._query(api,**common,dimensions="insightTrafficSourceType",metrics="views"); x=a[0] if a else {}; return RawVideoMetrics(video_id,x.get("views"),x.get("estimatedMinutesWatched"),x.get("averageViewDuration"),x.get("averageViewPercentage"),x.get("subscribersGained"),traffic_raw={r["insightTrafficSourceType"]:r["views"] for r in t})
  def ensure_token_unchanged(self):
-  if self._token_digest and self._token_digest!=hashlib.sha256(self.token_path.read_bytes()).digest(): raise YouTubeAuthorizationRequired("Authorization changed during sync")
+  if self._token_digest and self._token_digest!=hashlib.sha256(self.token_path.read_bytes()).digest(): raise YouTubeTokenChanged("Authorization changed during sync")
  def _query(self,api,**kw):
   try: p=api.reports().query(**kw).execute()
-  except Exception as e:
-   if "metric" in str(e).lower() and "not" in str(e).lower(): return []
+  except HttpError as e:
+   status=getattr(e.resp,"status",0)
+   if status in (401,403): raise YouTubeAuthorizationRequired("YouTube authorization is invalid") from e
+   if status==429: raise YouTubeQuotaError("YouTube quota exceeded") from e
+   if status>=500: raise YouTubeTransientError("YouTube upstream unavailable") from e
    raise YouTubeApiError("YouTube Analytics request failed") from e
+  except RefreshError as e: raise YouTubeAuthorizationRequired("YouTube authorization is invalid") from e
+  except (TimeoutError, ConnectionError) as e: raise YouTubeTransientError("YouTube upstream unavailable") from e
   h=[x["name"] for x in p.get("columnHeaders",[])]; return [dict(zip(h,r,strict=True)) for r in p.get("rows",[])]
  def _data(self):
   if self._data_api is None:self._data_api=self._api_builder("youtube","v3",self._load())
@@ -65,7 +75,9 @@ class YouTubeClient:
  def _load(self):
   if self._credentials is None:
    if not self.token_path.is_file():raise YouTubeAuthorizationRequired("YouTube authorization is required")
-   self._token_digest=hashlib.sha256(self.token_path.read_bytes()).digest(); self._credentials=self._credentials_loader(self.token_path,YOUTUBE_SCOPES)
+   self._token_digest=hashlib.sha256(self.token_path.read_bytes()).digest()
+   try:self._credentials=self._credentials_loader(self.token_path,YOUTUBE_SCOPES)
+   except RefreshError as e:raise YouTubeAuthorizationRequired("YouTube authorization is invalid") from e
   return self._credentials
  @staticmethod
  def _video(i): return UploadedVideo(i["id"],i["snippet"]["title"],_time(i["snippet"].get("publishedAt")),_duration(i["contentDetails"].get("duration")))

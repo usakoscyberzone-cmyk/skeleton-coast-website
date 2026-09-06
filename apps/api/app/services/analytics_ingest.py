@@ -1,12 +1,13 @@
 """Metric normalization and persistence helpers for read-only YouTube data."""
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 import json
 from typing import Any
 from dataclasses import asdict, is_dataclass
 
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..models import VideoMetricSnapshot
@@ -39,12 +40,15 @@ class MetricSnapshotInput:
     video_type: str | None = None
     format: str | None = None
     topic: str | None = None
+    published_at: datetime | None = None
 
 
-def normalize_metrics(raw: dict[str, Any]) -> MetricSnapshotInput:
+def normalize_metrics(raw: "RawVideoMetrics | dict[str, Any]") -> MetricSnapshotInput:
     """Convert API units to one internal convention: ratios are 0..1, gaps are None."""
     if is_dataclass(raw):
         raw = asdict(raw)
+    if raw.get("ctr") is not None:
+        raise ValueError("CTR is unavailable from the approved analytics source")
     traffic = raw.get("traffic") or raw.get("traffic_raw") or {}
     views = _as_int(raw.get("views"))
     subscribers_gained = _as_int(raw.get("subscribers_gained"))
@@ -53,7 +57,7 @@ def normalize_metrics(raw: dict[str, Any]) -> MetricSnapshotInput:
         youtube_video_id=str(raw["video_id"]),
         views=views,
         impressions=_as_int(raw.get("impressions")),
-        ctr=_as_ratio(raw.get("ctr")),
+        ctr=None,
         watch_minutes=_as_float(raw.get("watch_minutes")),
         avg_view_duration_seconds=_as_float(raw.get("avg_view_duration_seconds")),
         average_percentage_viewed=_percent_to_ratio(raw.get("average_percentage_viewed")),
@@ -79,6 +83,7 @@ def normalize_metrics(raw: dict[str, Any]) -> MetricSnapshotInput:
         video_type=raw.get("video_type"),
         format=raw.get("format", raw.get("video_type")),
         topic=raw.get("topic"),
+        published_at=raw.get("published_at"),
     )
 
 
@@ -126,29 +131,14 @@ def persist_metric_snapshot(
     session: Session, metric: MetricSnapshotInput, *, start_date: date, end_date: date
 ) -> VideoMetricSnapshot:
     """Upsert a retry-safe snapshot for one video and reporting period."""
-    snapshot = session.scalar(
-        select(VideoMetricSnapshot).where(
-            VideoMetricSnapshot.youtube_video_id == metric.youtube_video_id,
-            VideoMetricSnapshot.analytics_start_date == start_date,
-            VideoMetricSnapshot.analytics_end_date == end_date,
-        )
-    )
     values = {
         name: getattr(metric, name)
         for name in MetricSnapshotInput.__dataclass_fields__
         if name != "youtube_video_id" and name != "retention"
     }
     values["retention_json"] = json.dumps(metric.retention) if metric.retention is not None else None
-    if snapshot is None:
-        snapshot = VideoMetricSnapshot(
-            youtube_video_id=metric.youtube_video_id,
-            analytics_start_date=start_date,
-            analytics_end_date=end_date,
-            **values,
-        )
-        session.add(snapshot)
-    else:
-        for name, value in values.items():
-            setattr(snapshot, name, value)
+    statement = sqlite_insert(VideoMetricSnapshot).values(youtube_video_id=metric.youtube_video_id, analytics_start_date=start_date, analytics_end_date=end_date, **values)
+    session.execute(statement.on_conflict_do_update(index_elements=["youtube_video_id", "analytics_start_date", "analytics_end_date"], set_=values))
+    snapshot = session.scalar(select(VideoMetricSnapshot).where(VideoMetricSnapshot.youtube_video_id == metric.youtube_video_id, VideoMetricSnapshot.analytics_start_date == start_date, VideoMetricSnapshot.analytics_end_date == end_date))
     session.flush()
     return snapshot

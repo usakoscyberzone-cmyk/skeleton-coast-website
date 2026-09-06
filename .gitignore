@@ -1,4 +1,11 @@
+.env
+*.db
+.venv/
+node_modules/
+dist/
+build/
 youtube-token.json
+youtube-token.json.*
 *.oauth-state
 *.consumed
 __pycache__/

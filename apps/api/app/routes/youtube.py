@@ -12,7 +12,7 @@ from ..config import get_settings
 from ..db import begin_immediate_transaction, get_session
 from ..models import VideoMetricSnapshot
 from ..services.analytics_ingest import normalize_metrics, persist_metric_snapshot
-from ..services.youtube_client import YouTubeApiError, YouTubeAuthorizationRequired, YouTubeClient, YouTubeOAuthStateError
+from ..services.youtube_client import YouTubeApiError, YouTubeAuthorizationRequired, YouTubeClient, YouTubeOAuthStateError, YouTubeQuotaError, YouTubeTokenChanged, YouTubeTransientError
 
 
 router = APIRouter(prefix="/youtube", tags=["youtube"])
@@ -93,6 +93,12 @@ def sync_youtube(
         channel = client.get_authenticated_channel()
     except YouTubeAuthorizationRequired as error:
         raise HTTPException(status_code=401, detail="YouTube authorization is required.") from error
+    except YouTubeTokenChanged as error:
+        raise HTTPException(status_code=409, detail="YouTube authorization changed during sync.") from error
+    except YouTubeQuotaError as error:
+        raise HTTPException(status_code=503, detail="YouTube quota is temporarily unavailable.") from error
+    except (YouTubeTransientError, YouTubeApiError) as error:
+        raise HTTPException(status_code=502, detail="YouTube upstream request failed.") from error
     if channel.channel_id != settings.expected_youtube_channel_id:
         raise HTTPException(
             status_code=409,
