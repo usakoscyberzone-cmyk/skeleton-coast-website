@@ -1,48 +1,27 @@
 from pathlib import Path
-import time
+from threading import Event, Thread
 from types import SimpleNamespace
+
+import pytest
 
 from skeleton_helper.watcher import ProjectFolderWatcher, should_trigger_scan
 
 
-def test_should_trigger_scan_for_new_top_level_project(tmp_path: Path):
-    master = tmp_path / "YouTube Projects"
-    master.mkdir()
-    created = master / "New Project"
+class ManualTimer:
+    def __init__(self, interval, callback):
+        self.interval = interval
+        self.callback = callback
+        self.cancelled = False
 
-    assert should_trigger_scan(master, created) is True
+    def start(self):
+        pass
 
+    def cancel(self):
+        self.cancelled = True
 
-def test_should_not_trigger_for_generated_subfolder(tmp_path: Path):
-    master = tmp_path / "YouTube Projects"
-    project = master / "Pilchard" / "Thumbnails"
-
-    assert should_trigger_scan(master, project) is False
-
-
-def test_watcher_debounces_project_creation_events_for_two_seconds(tmp_path: Path):
-    master = tmp_path / "YouTube Projects"
-    master.mkdir()
-    calls: list[float] = []
-    watcher = ProjectFolderWatcher(
-        master,
-        "http://127.0.0.1:8000",
-        sync=lambda _: calls.append(time.monotonic()),
-    )
-    started_at = time.monotonic()
-
-    watcher.handle_directory_created(master / "New Project")
-    time.sleep(0.1)
-    watcher.handle_directory_created(master / "New Project")
-    time.sleep(1.75)
-
-    assert calls == []
-
-    time.sleep(0.35)
-    watcher.stop()
-
-    assert len(calls) == 1
-    assert calls[0] - started_at >= 2
+    def fire(self):
+        if not self.cancelled:
+            self.callback()
 
 
 class RecordingObserver:
@@ -53,6 +32,8 @@ class RecordingObserver:
         self.started = False
         self.stopped = False
         self.joined = False
+        self.on_start = None
+        self.on_stop = None
 
     def schedule(self, handler, path, recursive):
         self.handler = handler
@@ -61,32 +42,88 @@ class RecordingObserver:
 
     def start(self):
         self.started = True
+        if self.on_start is not None:
+            self.on_start()
 
     def stop(self):
         self.stopped = True
+        if self.on_stop is not None:
+            self.on_stop()
 
     def join(self):
         self.joined = True
 
 
-def test_start_syncs_immediately_and_handles_new_top_level_directory(tmp_path: Path):
+def make_timer_factory(timers):
+    def make_timer(interval, callback):
+        timer = ManualTimer(interval, callback)
+        timers.append(timer)
+        return timer
+
+    return make_timer
+
+
+def test_should_trigger_scan_for_new_top_level_project(tmp_path: Path):
+    master = tmp_path / "YouTube Projects"
+    master.mkdir()
+
+    assert should_trigger_scan(master, master / "New Project") is True
+
+
+def test_should_not_trigger_for_generated_subfolder(tmp_path: Path):
+    master = tmp_path / "YouTube Projects"
+
+    assert should_trigger_scan(master, master / "Pilchard" / "Thumbnails") is False
+
+
+def test_watcher_debounces_project_creation_events_for_exactly_two_seconds(tmp_path: Path):
     master = tmp_path / "YouTube Projects"
     master.mkdir()
     calls: list[str] = []
+    timers: list[ManualTimer] = []
     observer = RecordingObserver()
     watcher = ProjectFolderWatcher(
         master,
         "http://127.0.0.1:8000",
         sync=calls.append,
         observer_factory=lambda: observer,
-        debounce_seconds=0.01,
+        timer_factory=make_timer_factory(timers),
+    )
+    watcher.start()
+    calls.clear()
+
+    watcher.handle_directory_created(master / "New Project")
+    watcher.handle_directory_created(master / "New Project")
+
+    assert [timer.interval for timer in timers] == [2, 2]
+    assert timers[0].cancelled is True
+    assert calls == []
+
+    timers[1].fire()
+    watcher.stop()
+
+    assert calls == ["http://127.0.0.1:8000"]
+
+
+def test_start_syncs_immediately_and_handles_new_top_level_directory(tmp_path: Path):
+    master = tmp_path / "YouTube Projects"
+    master.mkdir()
+    calls: list[str] = []
+    timers: list[ManualTimer] = []
+    observer = RecordingObserver()
+    watcher = ProjectFolderWatcher(
+        master,
+        "http://127.0.0.1:8000",
+        sync=calls.append,
+        observer_factory=lambda: observer,
+        timer_factory=make_timer_factory(timers),
     )
 
     watcher.start()
     observer.handler.on_created(
         SimpleNamespace(is_directory=True, src_path=str(master / "New Project"))
     )
-    time.sleep(0.05)
+    timers[0].fire()
     watcher.stop()
 
     assert calls == ["http://127.0.0.1:8000", "http://127.0.0.1:8000"]
@@ -97,22 +134,139 @@ def test_start_syncs_immediately_and_handles_new_top_level_directory(tmp_path: P
     assert observer.joined is True
 
 
-def test_stop_cancels_a_pending_debounced_sync(tmp_path: Path):
+def test_start_begins_observer_before_the_immediate_sync(tmp_path: Path):
+    master = tmp_path / "YouTube Projects"
+    master.mkdir()
+    observer = RecordingObserver()
+    sync_started = Event()
+    release_sync = Event()
+
+    def blocking_sync(_: str):
+        sync_started.set()
+        release_sync.wait(timeout=1)
+
+    watcher = ProjectFolderWatcher(
+        master,
+        "http://127.0.0.1:8000",
+        sync=blocking_sync,
+        observer_factory=lambda: observer,
+    )
+    start_thread = Thread(target=watcher.start)
+    start_thread.start()
+    try:
+        assert sync_started.wait(timeout=0.5)
+        assert observer.started is True
+    finally:
+        release_sync.set()
+        start_thread.join(timeout=1)
+        watcher.stop()
+
+    assert start_thread.is_alive() is False
+
+
+def test_stop_rejects_event_dispatched_during_observer_shutdown(tmp_path: Path):
     master = tmp_path / "YouTube Projects"
     master.mkdir()
     calls: list[str] = []
+    timers: list[ManualTimer] = []
+    observer = RecordingObserver()
     watcher = ProjectFolderWatcher(
         master,
         "http://127.0.0.1:8000",
         sync=calls.append,
-        debounce_seconds=0.05,
+        observer_factory=lambda: observer,
+        timer_factory=make_timer_factory(timers),
     )
+    watcher.start()
+    calls.clear()
+
+    def dispatch_late_event():
+        event_thread = Thread(
+            target=watcher.handle_directory_created,
+            args=(master / "New Project",),
+        )
+        event_thread.start()
+        event_thread.join(timeout=1)
+        assert event_thread.is_alive() is False
+
+    observer.on_stop = dispatch_late_event
+    watcher.stop()
+
+    assert timers == []
+    assert calls == []
+
+
+def test_stop_cancels_a_pending_debounced_sync(tmp_path: Path):
+    master = tmp_path / "YouTube Projects"
+    master.mkdir()
+    calls: list[str] = []
+    timers: list[ManualTimer] = []
+    observer = RecordingObserver()
+    watcher = ProjectFolderWatcher(
+        master,
+        "http://127.0.0.1:8000",
+        sync=calls.append,
+        observer_factory=lambda: observer,
+        timer_factory=make_timer_factory(timers),
+    )
+    watcher.start()
+    calls.clear()
 
     watcher.handle_directory_created(master / "New Project")
     watcher.stop()
-    time.sleep(0.1)
+    timers[0].fire()
 
     assert calls == []
+
+
+def test_delayed_sync_reports_error_without_raising_from_timer(tmp_path: Path):
+    master = tmp_path / "YouTube Projects"
+    master.mkdir()
+    timers: list[ManualTimer] = []
+    observer = RecordingObserver()
+    errors: list[Exception] = []
+    fail_delayed_sync = False
+
+    def sync(_: str):
+        if fail_delayed_sync:
+            raise RuntimeError("API unavailable")
+
+    watcher = ProjectFolderWatcher(
+        master,
+        "http://127.0.0.1:8000",
+        sync=sync,
+        observer_factory=lambda: observer,
+        timer_factory=make_timer_factory(timers),
+        on_error=errors.append,
+    )
+    watcher.start()
+    fail_delayed_sync = True
+
+    watcher.handle_directory_created(master / "New Project")
+    timers[0].fire()
+    watcher.stop()
+
+    assert len(errors) == 1
+    assert str(errors[0]) == "API unavailable"
+
+
+def test_start_stops_observer_if_immediate_sync_fails(tmp_path: Path):
+    master = tmp_path / "YouTube Projects"
+    master.mkdir()
+    observer = RecordingObserver()
+    watcher = ProjectFolderWatcher(
+        master,
+        "http://127.0.0.1:8000",
+        sync=lambda _: (_ for _ in ()).throw(RuntimeError("API unavailable")),
+        observer_factory=lambda: observer,
+    )
+
+    with pytest.raises(RuntimeError, match="API unavailable"):
+        watcher.start()
+
+    assert observer.started is True
+    assert observer.stopped is True
+    assert observer.joined is True
 
 
 def test_main_prints_configuration_starts_watcher_and_stops_on_interrupt(
