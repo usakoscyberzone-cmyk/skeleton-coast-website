@@ -3,7 +3,7 @@ import multiprocessing
 from pathlib import Path
 import sqlite3
 import subprocess
-from threading import Lock, Timer
+from threading import Barrier, Lock, Timer
 import time
 
 import app.db as database
@@ -422,6 +422,68 @@ def test_upgrade_media_files_schema_deduplicates_legacy_rows_and_adds_unique_ind
         index["unique"] and index["column_names"] == ["project_id", "path"]
         for index in unique_indexes
     )
+
+
+def test_upgrade_media_files_schema_serializes_concurrent_legacy_startups(
+    tmp_path: Path, monkeypatch
+):
+    """Breaks if two startup connections both add the legacy probe_error column."""
+    from app.db import upgrade_media_files_schema
+
+    database_path = tmp_path / "concurrent-legacy.db"
+    upgrade_engine = create_engine(
+        f"sqlite:///{database_path}", connect_args={"check_same_thread": False}
+    )
+    with upgrade_engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE media_files ("
+            "id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, path TEXT NOT NULL, "
+            "kind TEXT NOT NULL)"
+        )
+
+    original_inspect = database.inspect
+    pre_transaction_barrier = Barrier(2)
+
+    def synchronize_pre_transaction_inspection(bind):
+        inspected = original_inspect(bind)
+        if bind is upgrade_engine:
+            pre_transaction_barrier.wait(timeout=5)
+        return inspected
+
+    monkeypatch.setattr(database, "inspect", synchronize_pre_transaction_inspection)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(upgrade_media_files_schema, upgrade_engine) for _ in range(2)]
+        for future in futures:
+            future.result(timeout=5)
+
+    with upgrade_engine.connect() as connection:
+        columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(media_files)")
+        }
+    assert "probe_error" in columns
+
+
+def test_upgrade_media_files_schema_does_not_duplicate_fresh_unique_indexes(tmp_path: Path):
+    """Breaks if startup adds another project/path unique index to a fresh schema."""
+    from app.db import upgrade_media_files_schema
+
+    fresh_engine = create_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
+    database.Base.metadata.create_all(bind=fresh_engine)
+
+    upgrade_media_files_schema(fresh_engine)
+
+    with fresh_engine.connect() as connection:
+        unique_project_path_indexes = []
+        for _, name, unique, *_ in connection.exec_driver_sql("PRAGMA index_list(media_files)"):
+            columns = [
+                row[2]
+                for row in connection.exec_driver_sql(f"PRAGMA index_info('{name}')")
+            ]
+            if unique and columns == ["project_id", "path"]:
+                unique_project_path_indexes.append(name)
+
+    assert len(unique_project_path_indexes) == 1
 
 
 def test_begin_immediate_transaction_waits_for_a_separate_process_lock(tmp_path: Path):

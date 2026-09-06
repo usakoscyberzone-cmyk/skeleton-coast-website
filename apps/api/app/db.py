@@ -28,23 +28,33 @@ def get_session() -> Iterator[Session]:
 
 
 def upgrade_media_files_schema(bind) -> None:
-    inspector = inspect(bind)
-    if "media_files" not in inspector.get_table_names():
-        return
-    column_names = {
-        column["name"] for column in inspector.get_columns("media_files")
-    }
-    with bind.begin() as connection:
+    connection = bind.connect()
+    try:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        inspector = inspect(connection)
+        if "media_files" not in inspector.get_table_names():
+            connection.commit()
+            return
+        column_names = {
+            column["name"] for column in inspector.get_columns("media_files")
+        }
         if "probe_error" not in column_names:
             connection.exec_driver_sql("ALTER TABLE media_files ADD COLUMN probe_error TEXT")
         connection.exec_driver_sql(
             "DELETE FROM media_files WHERE id NOT IN ("
             "SELECT MIN(id) FROM media_files GROUP BY project_id, path)"
         )
-        connection.exec_driver_sql(
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_media_files_project_path "
-            "ON media_files (project_id, path)"
-        )
+        if not _has_unique_project_path_index(connection):
+            connection.exec_driver_sql(
+                "CREATE UNIQUE INDEX uq_media_files_project_path "
+                "ON media_files (project_id, path)"
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def begin_immediate_transaction(
@@ -63,3 +73,16 @@ def begin_immediate_transaction(
 
 def _is_sqlite_lock_error(error: OperationalError) -> bool:
     return "database is locked" in str(error.orig).lower()
+
+
+def _has_unique_project_path_index(connection) -> bool:
+    for _, name, unique, *_ in connection.exec_driver_sql("PRAGMA index_list(media_files)"):
+        if not unique:
+            continue
+        column_names = [
+            row[2]
+            for row in connection.exec_driver_sql(f"PRAGMA index_info('{name}')")
+        ]
+        if column_names == ["project_id", "path"]:
+            return True
+    return False
