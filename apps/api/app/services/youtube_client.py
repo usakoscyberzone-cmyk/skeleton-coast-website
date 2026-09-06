@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-import hashlib, json, re
+import hashlib, json, re, os, secrets
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
@@ -91,7 +91,13 @@ class YouTubeClient:
    return p["state"]
   except Exception as e:raise YouTubeOAuthStateError("OAuth callback state is invalid or expired") from e
  @staticmethod
- def _write(path,text): path.parent.mkdir(parents=True,exist_ok=True); t=path.with_name("."+path.name+".tmp"); t.write_text(text); t.replace(path)
+ def _write(path,text):
+  path.parent.mkdir(parents=True,exist_ok=True); t=path.with_name("."+path.name+"."+secrets.token_hex(12)+".tmp")
+  try:
+   with open(t,"x",encoding="utf-8") as handle:
+    handle.write(text); handle.flush(); os.fsync(handle.fileno())
+   os.replace(t,path)
+  finally: t.unlink(missing_ok=True)
  @staticmethod
  def _default_flow_factory(**kw):
   from google_auth_oauthlib.flow import Flow; return Flow.from_client_secrets_file(str(kw["client_secret_path"]),scopes=kw["scopes"],redirect_uri=kw["redirect_uri"])

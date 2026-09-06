@@ -113,6 +113,7 @@ def sync_youtube(
             {
                 **client.fetch_video_metrics(video.video_id, start_date.isoformat(), end_date.isoformat()).__dict__,
                 "title": video.title,
+                "published_at": video.published_at,
                 "duration_seconds": video.duration_seconds,
                 "video_type": video.video_type,
             }

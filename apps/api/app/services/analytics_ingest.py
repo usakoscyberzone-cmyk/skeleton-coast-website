@@ -47,8 +47,9 @@ def normalize_metrics(raw: "RawVideoMetrics | dict[str, Any]") -> MetricSnapshot
     """Convert API units to one internal convention: ratios are 0..1, gaps are None."""
     if is_dataclass(raw):
         raw = asdict(raw)
-    if raw.get("ctr") is not None:
-        raise ValueError("CTR is unavailable from the approved analytics source")
+    ctr = raw.get("ctr")
+    if ctr is not None and not 0 <= float(ctr) <= 1:
+        raise ValueError("CTR must be a normalized ratio between 0 and 1")
     traffic = raw.get("traffic") or raw.get("traffic_raw") or {}
     views = _as_int(raw.get("views"))
     subscribers_gained = _as_int(raw.get("subscribers_gained"))
@@ -57,7 +58,7 @@ def normalize_metrics(raw: "RawVideoMetrics | dict[str, Any]") -> MetricSnapshot
         youtube_video_id=str(raw["video_id"]),
         views=views,
         impressions=_as_int(raw.get("impressions")),
-        ctr=None,
+        ctr=_as_float(ctr),
         watch_minutes=_as_float(raw.get("watch_minutes")),
         avg_view_duration_seconds=_as_float(raw.get("avg_view_duration_seconds")),
         average_percentage_viewed=_percent_to_ratio(raw.get("average_percentage_viewed")),
@@ -67,11 +68,11 @@ def normalize_metrics(raw: "RawVideoMetrics | dict[str, Any]") -> MetricSnapshot
             if subscribers_gained is not None and views is not None and views > 0
             else None
         ),
-        browse_share=None,
-        suggested_share=_traffic_share(traffic, "RELATED_VIDEO"),
-        search_share=_traffic_share(traffic, "YT_SEARCH"),
-        external_share=_traffic_share(traffic, "EXT_URL"),
-        shorts_feed_share=_traffic_share(traffic, "SHORTS"),
+        browse_share=_normalized_share(traffic, "BROWSE"),
+        suggested_share=_normalized_share(traffic, "SUGGESTED") if "SUGGESTED" in traffic else _traffic_share(traffic, "RELATED_VIDEO"),
+        search_share=_normalized_share(traffic, "SEARCH") if "SEARCH" in traffic else _traffic_share(traffic, "YT_SEARCH"),
+        external_share=_normalized_share(traffic, "EXTERNAL") if "EXTERNAL" in traffic else _traffic_share(traffic, "EXT_URL"),
+        shorts_feed_share=_normalized_share(traffic, "SHORTS") if "SHORTS" in traffic and all(float(v) <= 1 for v in traffic.values()) else _traffic_share(traffic, "SHORTS"),
         returning_viewers=_as_int(raw.get("returning_viewers")),
         retention=_normalize_retention(retention),
         views_1h=_as_int(raw.get("views_1h")),
@@ -113,6 +114,10 @@ def _traffic_share(traffic: dict[str, Any], source: str) -> float | None:
         return None
     total = sum(float(value) for value in traffic.values())
     return float(traffic[source]) / total if total else None
+
+
+def _normalized_share(traffic: dict[str, Any], source: str) -> float | None:
+    return float(traffic[source]) if source in traffic else None
 
 
 def _normalize_retention(points: Any) -> list[dict[str, float]] | None:

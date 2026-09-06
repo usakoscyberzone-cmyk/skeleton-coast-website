@@ -9,3 +9,9 @@ youtube-token.json.*
 *.oauth-state
 *.consumed
 __pycache__/
+.worktrees/
+.superpowers/
+.pytest_cache/
+*.pyc
+coverage/
+.*youtube-token.json*.tmp
