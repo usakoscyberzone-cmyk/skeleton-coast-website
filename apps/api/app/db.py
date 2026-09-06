@@ -82,7 +82,7 @@ def upgrade_video_metrics_schema(bind) -> None:
             unique_period = "uq_video_metric_period" in index_sql and "coalesce" in index_sql["uq_video_metric_period"].lower()
             needs_rebuild = any(name not in current or current[name]["nullable"] is False for name in required) or not unique_period
             if needs_rebuild:
-                retained_indexes = list(index_sql.values())
+                retained_indexes = list(index_sql.items())
                 connection.exec_driver_sql("ALTER TABLE video_metric_snapshots RENAME TO video_metric_snapshots_legacy")
                 for name in index_sql:
                     connection.exec_driver_sql(f'DROP INDEX "{name.replace(chr(34), chr(34) * 2)}"')
@@ -103,8 +103,7 @@ def upgrade_video_metrics_schema(bind) -> None:
                     )
                 connection.exec_driver_sql("DROP TABLE video_metric_snapshots_legacy")
                 existing = {row[1] for row in connection.exec_driver_sql("PRAGMA index_list(video_metric_snapshots)")}
-                for sql in retained_indexes:
-                    name = sql.split()[2].strip('"')
+                for name, sql in retained_indexes:
                     if name not in existing:
                         connection.exec_driver_sql(sql)
             else:

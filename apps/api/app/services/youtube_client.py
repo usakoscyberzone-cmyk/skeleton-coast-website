@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-import hashlib, json, os, re, secrets, subprocess
+import ctypes, hashlib, json, os, re, secrets, subprocess
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
@@ -13,6 +13,7 @@ AGGREGATE_METRICS = "views,estimatedMinutesWatched,averageViewDuration,averageVi
 class YouTubeAuthorizationRequired(RuntimeError): pass
 class YouTubeOAuthStateError(RuntimeError): pass
 class YouTubeOAuthCallbackError(RuntimeError): pass
+class YouTubeConfigurationError(RuntimeError): pass
 class YouTubeApiError(RuntimeError): pass
 class YouTubeQuotaError(YouTubeApiError): pass
 class YouTubeTransientError(YouTubeApiError): pass
@@ -37,11 +38,64 @@ class RawVideoMetrics:
     returning_viewers: int | None = None
     traffic_raw: dict[str, int] = field(default_factory=dict)
 
+
+class _ExclusiveTokenLock:
+    """An OS-held lock whose identity does not depend on the sidecar path."""
+
+    def __init__(self, token_path: Path):
+        self._token_path = token_path
+        self._handle = None
+        self._descriptor = None
+
+    def acquire(self) -> None:
+        if os.name == "nt":
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+            kernel32.CreateMutexW.restype = ctypes.c_void_p
+            name = "Local\\SkeletonCoastYouTubeToken-" + hashlib.sha256(
+                os.path.normcase(str(self._token_path)).encode("utf-8")
+            ).hexdigest()
+            handle = kernel32.CreateMutexW(None, True, name)
+            if not handle:
+                raise OSError(ctypes.get_last_error(), "Could not create token mutex")
+            if ctypes.get_last_error() == 183:
+                kernel32.CloseHandle(handle)
+                raise YouTubeTokenChanged("Authorization is already in use")
+            self._handle = (kernel32, handle)
+            return
+
+        import fcntl
+
+        lock_path = self._token_path.with_name(self._token_path.name + ".lock")
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            os.close(descriptor)
+            raise YouTubeTokenChanged("Authorization is already in use") from error
+        self._descriptor = descriptor
+
+    def release(self) -> None:
+        if self._handle is not None:
+            kernel32, handle = self._handle
+            self._handle = None
+            kernel32.ReleaseMutex(handle)
+            kernel32.CloseHandle(handle)
+        if self._descriptor is not None:
+            import fcntl
+
+            descriptor, self._descriptor = self._descriptor, None
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
 class YouTubeClient:
     def __init__(self, *, token_path: Path, client_secret_path: Path | None = None, redirect_uri="http://127.0.0.1:8000/youtube/oauth/callback", data_api=None, analytics_api=None, flow_factory=None, credentials_loader=None, api_builder=None):
-        token_path = Path(token_path).resolve()
+        token_path = Path(token_path)
+        if not token_path.is_absolute():
+            raise ValueError("YOUTUBE_TOKEN_PATH must be absolute and outside the repository")
+        token_path = token_path.resolve()
         repo_root = Path(__file__).resolve().parents[4]
-        if not token_path.is_absolute() or token_path == repo_root or repo_root in token_path.parents:
+        if token_path == repo_root or repo_root in token_path.parents:
             raise ValueError("YOUTUBE_TOKEN_PATH must be absolute and outside the repository")
         self.token_path, self.client_secret_path, self.redirect_uri = token_path, Path(client_secret_path) if client_secret_path else None, redirect_uri
         self._data_api, self._analytics_api = data_api, analytics_api
@@ -86,12 +140,18 @@ class YouTubeClient:
 
     @contextmanager
     def token_guard(self):
-        lock = self.token_path.with_name(self.token_path.name + ".lock"); self._secure_parent(lock.parent)
-        try: descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as error: raise YouTubeTokenChanged("Authorization is already in use") from error
+        lock = self.token_path.with_name(self.token_path.name + ".lock")
+        self._secure_parent(lock.parent)
+        mutex = _ExclusiveTokenLock(self.token_path)
+        mutex.acquire()
         try:
-            os.close(descriptor); self._secure_acl(lock); yield; self.ensure_token_unchanged()
-        finally: lock.unlink(missing_ok=True)
+            if lock.exists():
+                self._verify_owner_only_acl(lock)
+            else:
+                self._write(lock, "")
+            yield
+        finally:
+            mutex.release()
     def ensure_token_unchanged(self):
         if self._token_digest is None: return
         try: current = hashlib.sha256(self.token_path.read_bytes()).digest()

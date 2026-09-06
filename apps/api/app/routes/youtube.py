@@ -5,24 +5,56 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pathlib import Path
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import begin_immediate_transaction, get_session
 from ..models import VideoMetricSnapshot
 from ..services.analytics_ingest import normalize_metrics, persist_metric_snapshot
-from ..services.youtube_client import YouTubeApiError, YouTubeAuthorizationRequired, YouTubeClient, YouTubeOAuthCallbackError, YouTubeOAuthStateError, YouTubeQuotaError, YouTubeTokenChanged, YouTubeTransientError
+from ..services.youtube_client import YouTubeApiError, YouTubeAuthorizationRequired, YouTubeClient, YouTubeConfigurationError, YouTubeOAuthCallbackError, YouTubeOAuthStateError, YouTubeQuotaError, YouTubeTokenChanged, YouTubeTransientError
 
 
 router = APIRouter(prefix="/youtube", tags=["youtube"])
 analytics_router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 
+YOUTUBE_ROUTE_ERRORS = (
+    YouTubeOAuthStateError,
+    YouTubeOAuthCallbackError,
+    YouTubeTokenChanged,
+    YouTubeConfigurationError,
+    YouTubeAuthorizationRequired,
+    YouTubeQuotaError,
+    YouTubeTransientError,
+    YouTubeApiError,
+    ValueError,
+    PermissionError,
+)
+
+
+def _youtube_http_error(error: Exception) -> HTTPException:
+    if isinstance(error, (YouTubeOAuthStateError, YouTubeOAuthCallbackError)):
+        return HTTPException(status_code=400, detail="OAuth callback could not be validated.")
+    if isinstance(error, YouTubeTokenChanged):
+        return HTTPException(status_code=409, detail="YouTube authorization changed during the operation.")
+    if isinstance(error, (YouTubeConfigurationError, ValueError, PermissionError)):
+        return HTTPException(status_code=503, detail="YouTube credential storage is not securely configured.")
+    if isinstance(error, YouTubeAuthorizationRequired):
+        return HTTPException(status_code=401, detail="YouTube authorization is required.")
+    if isinstance(error, YouTubeQuotaError):
+        return HTTPException(status_code=503, detail="YouTube quota is temporarily unavailable.")
+    if isinstance(error, YouTubeTransientError):
+        return HTTPException(status_code=502, detail="YouTube upstream request failed.")
+    if isinstance(error, YouTubeApiError):
+        return HTTPException(status_code=502, detail="YouTube upstream request failed.")
+    raise error
+
+
 def get_youtube_client() -> YouTubeClient:
     settings = get_settings()
     if not settings.youtube_token_path:
-        raise YouTubeAuthorizationRequired("YOUTUBE_TOKEN_PATH is required")
+        raise YouTubeConfigurationError("YOUTUBE_TOKEN_PATH is required")
     return YouTubeClient(
         token_path=Path(settings.youtube_token_path),
         client_secret_path=(Path(settings.youtube_client_secret_path) if settings.youtube_client_secret_path else None),
@@ -40,14 +72,13 @@ def youtube_status() -> dict[str, str]:
         }
     if not settings.youtube_client_secret_path or not Path(settings.youtube_client_secret_path).is_file():
         return {"status": "configuration_required", "detail": "YOUTUBE_CLIENT_SECRET_PATH is required."}
-    if not settings.youtube_token_path or not Path(settings.youtube_token_path).is_file():
-        return {"status": "authorization_required", "detail": "YouTube authorization is required."}
     try:
-        channel = get_youtube_client().get_authenticated_channel()
-    except YouTubeAuthorizationRequired:
-        return {"status": "authorization_required", "detail": "YouTube authorization is required."}
-    except YouTubeApiError:
-        return {"status": "authorization_required", "detail": "YouTube authorization must be renewed."}
+        client = get_youtube_client()
+        if not client.token_path.is_file():
+            raise YouTubeAuthorizationRequired("YouTube authorization is required")
+        channel = client.get_authenticated_channel()
+    except YOUTUBE_ROUTE_ERRORS as error:
+        raise _youtube_http_error(error) from error
     if channel.channel_id != settings.expected_youtube_channel_id:
         return {"status": "channel_mismatch", "detail": "Authorized channel does not match EXPECTED_YOUTUBE_CHANNEL_ID."}
     return {"status": "authorized", "channel_id": channel.channel_id, "channel_title": channel.title}
@@ -58,7 +89,10 @@ def start_oauth() -> dict[str, str]:
     settings = get_settings()
     if not settings.youtube_client_secret_path or not Path(settings.youtube_client_secret_path).is_file():
         raise HTTPException(status_code=503, detail="YOUTUBE_CLIENT_SECRET_PATH is required before OAuth can start.")
-    start = get_youtube_client().start_oauth()
+    try:
+        start = get_youtube_client().start_oauth()
+    except YOUTUBE_ROUTE_ERRORS as error:
+        raise _youtube_http_error(error) from error
     return {"authorization_url": start.authorization_url, "state": start.state}
 
 
@@ -71,8 +105,8 @@ def complete_oauth(code: str | None = None, state: str | None = None, error: str
         if not code or not state:
             raise YouTubeOAuthStateError()
         get_youtube_client().complete_oauth(code=code, state=state)
-    except (YouTubeOAuthStateError, YouTubeOAuthCallbackError) as error:
-        raise HTTPException(status_code=400, detail="OAuth callback could not be validated.") from error
+    except YOUTUBE_ROUTE_ERRORS as error:
+        raise _youtube_http_error(error) from error
     return {"status": "authorized"}
 
 
@@ -103,24 +137,18 @@ def sync_youtube(
             begin_immediate_transaction(session)
             for metric in pending:
                 persist_metric_snapshot(session, metric, start_date=start_date, end_date=end_date)
-            client.ensure_token_unchanged()
+            def validate_token_before_commit(_session):
+                client.ensure_token_unchanged()
+
+            event.listen(session, "before_commit", validate_token_before_commit, once=True)
             session.commit()
             return {"status": "synced", "channel_id": channel.channel_id, "channel_title": channel.title, "video_count": len(pending)}
     except HTTPException:
         session.rollback()
         raise
-    except YouTubeTokenChanged as error:
-        session.rollback(); raise HTTPException(status_code=409, detail="YouTube authorization changed during sync.") from error
-    except YouTubeAuthorizationRequired as error:
-        session.rollback(); raise HTTPException(status_code=401, detail="YouTube authorization is required.") from error
-    except YouTubeQuotaError as error:
-        session.rollback(); raise HTTPException(status_code=503, detail="YouTube quota is temporarily unavailable.") from error
-    except YouTubeTransientError as error:
-        session.rollback(); raise HTTPException(status_code=502, detail="YouTube upstream request failed.") from error
-    except YouTubeApiError as error:
-        session.rollback(); raise HTTPException(status_code=502, detail="YouTube upstream request failed.") from error
-    except (ValueError, PermissionError) as error:
-        session.rollback(); raise HTTPException(status_code=503, detail="YouTube credential storage is not securely configured.") from error
+    except YOUTUBE_ROUTE_ERRORS as error:
+        session.rollback()
+        raise _youtube_http_error(error) from error
 
 
 @analytics_router.get("/summary")

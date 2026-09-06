@@ -9,3 +9,5 @@
 7. Start the dashboard, open `GET /youtube/oauth/start`, complete Google authorization, then visit `GET /youtube/status`. It should progress from `authorization_required` to the configured channel state before a sync.
 
 The application requests only `youtube.readonly` and `yt-analytics.readonly`. It has no upload, publishing, metadata-editing, playlist-management, or channel-management scope.
+
+The targeted Analytics endpoint does not expose thumbnail impressions, thumbnail CTR, or returning-viewer counts for this channel report. Those fields remain `null` when unavailable; the dashboard does not fabricate them and V1 does not create bulk YouTube Reporting jobs.
