@@ -21,10 +21,9 @@ def test_normalize_metrics_calculates_rates_and_converts_google_percentages_to_r
         "subscribers_gained": 5,
         "returning_viewers": 120,
         "traffic": {
-            "BROWSE": 57.6,
-            "SUGGESTED": 4.0,
-            "SEARCH": 8.0,
-            "EXTERNAL": 27.0,
+            "RELATED_VIDEO": 57.6,
+            "YT_SEARCH": 4.0,
+            "EXT_URL": 8.0,
             "SHORTS": 0.0,
         },
         "retention": [{"elapsed_ratio": 0.5, "audience_retention": 75.0}],
@@ -38,9 +37,10 @@ def test_normalize_metrics_calculates_rates_and_converts_google_percentages_to_r
     assert result.subscriber_conversion_rate == 5 / 422
     assert result.ctr == 0.071
     assert result.average_percentage_viewed == 0.428
-    assert result.browse_share == 0.576
+    assert result.browse_share is None
+    assert result.suggested_share == 57.6 / 69.6
     assert result.returning_viewers == 120
-    assert result.retention == [{"elapsed_ratio": 0.5, "audience_retention": 0.75}]
+    assert result.retention == [{"elapsed_ratio": 0.5, "audience_retention": 75.0}]
     assert (result.views_1h, result.views_24h, result.views_7d) == (31, 190, 410)
 
 

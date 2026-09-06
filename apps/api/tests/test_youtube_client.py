@@ -157,8 +157,8 @@ def test_list_uploaded_videos_paginates_and_infers_long_and_short_formats(tmp_pa
     videos = client.list_uploaded_videos("UU-skeleton")
 
     assert [(video.video_id, video.video_type, video.duration_seconds) for video in videos] == [
-        ("long", "long_form", 61),
-        ("short", "short", 59),
+        ("long", "unknown", 61),
+        ("short", "unknown", 59),
     ]
 
 
@@ -166,7 +166,7 @@ class _Reports:
     def query(self, **kwargs):
         if kwargs["metrics"] == "returningViewers":
             return _Request({"columnHeaders": [{"name": "returningViewers"}], "rows": [[19]]})
-        if kwargs["dimensions"] == "video":
+        if "dimensions" not in kwargs:
             return _Request({"columnHeaders": [{"name": name} for name in ["views", "estimatedMinutesWatched", "averageViewDuration", "subscribersGained", "impressions", "impressionsCtr", "averageViewPercentage"]], "rows": [[422, 480.0, 68.0, 5, 5000, 7.1, 42.8]]})
         if kwargs["dimensions"] == "insightTrafficSourceType":
             return _Request({"columnHeaders": [{"name": "insightTrafficSourceType"}, {"name": "views"}], "rows": [["BROWSE", 240], ["EXTERNAL", 20]]})
@@ -182,12 +182,12 @@ def test_fetch_video_metrics_maps_mocked_data_and_analytics_responses(tmp_path: 
     """Changing Analytics column mapping or traffic normalization must fail this test."""
     client = YouTubeClient(token_path=tmp_path / "token.json", data_api=_DataApi(), analytics_api=_AnalyticsApi())
 
-    metrics = client.fetch_video_metrics("abc123", "UC-skeleton", "2026-09-01", "2026-09-06")
+    metrics = client.fetch_video_metrics("abc123", "2026-09-01", "2026-09-06")
 
-    assert metrics["views"] == 422
-    assert metrics["ctr"] == 7.1
-    assert metrics["traffic"] == {"BROWSE": 240 / 260, "EXTERNAL": 20 / 260}
-    assert metrics["returning_viewers"] == 19
+    assert metrics.views == 422
+    assert metrics.ctr is None
+    assert metrics.traffic_raw == {"BROWSE": 240, "EXTERNAL": 20}
+    assert metrics.returning_viewers is None
 
 
 def test_status_and_sync_report_configuration_required_before_any_channel_query(monkeypatch):

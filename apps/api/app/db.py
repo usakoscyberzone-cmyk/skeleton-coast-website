@@ -61,7 +61,7 @@ def upgrade_media_files_schema(bind) -> None:
 
 
 def upgrade_video_metrics_schema(bind) -> None:
-    """Add nullable analytics columns without rewriting a user's SQLite database."""
+    """Rebuild legacy metric tables so unavailable API values are truly nullable."""
     if bind.dialect.name != "sqlite":
         return
     additions = {
@@ -76,10 +76,25 @@ def upgrade_video_metrics_schema(bind) -> None:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         inspector = inspect(connection)
         if "video_metric_snapshots" in inspector.get_table_names():
-            current = {column["name"] for column in inspector.get_columns("video_metric_snapshots")}
-            for name, ddl in additions.items():
-                if name not in current:
-                    connection.exec_driver_sql(f"ALTER TABLE video_metric_snapshots ADD COLUMN {name} {ddl}")
+            current = {column["name"]: column for column in inspector.get_columns("video_metric_snapshots")}
+            required = {"views", "impressions", "ctr", "watch_minutes", "avg_view_duration_seconds", "subscribers_gained", "browse_share", "suggested_share", "search_share", "external_share", "shorts_feed_share"}
+            needs_rebuild = any(name not in current or current[name]["nullable"] is False for name in required)
+            if needs_rebuild:
+                connection.exec_driver_sql("ALTER TABLE video_metric_snapshots RENAME TO video_metric_snapshots_legacy")
+                from .models import VideoMetricSnapshot
+                VideoMetricSnapshot.__table__.create(connection)
+                legacy = {c["name"] for c in inspect(connection).get_columns("video_metric_snapshots_legacy")}
+                target = [c.name for c in VideoMetricSnapshot.__table__.columns]
+                common = [c for c in target if c in legacy]
+                if common:
+                    names = ", ".join(common)
+                    connection.exec_driver_sql(f"INSERT OR IGNORE INTO video_metric_snapshots ({names}) SELECT {names} FROM video_metric_snapshots_legacy ORDER BY id")
+                connection.exec_driver_sql("DROP TABLE video_metric_snapshots_legacy")
+            else:
+                for name, ddl in additions.items():
+                    if name not in current:
+                        connection.exec_driver_sql(f"ALTER TABLE video_metric_snapshots ADD COLUMN {name} {ddl}")
+            connection.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS uq_video_metric_period_index ON video_metric_snapshots (youtube_video_id, analytics_start_date, analytics_end_date) WHERE analytics_start_date IS NOT NULL AND analytics_end_date IS NOT NULL")
         connection.commit()
     except Exception:
         connection.rollback()

@@ -33,6 +33,7 @@ class MediaFile(Base):
 
 class VideoMetricSnapshot(Base):
     __tablename__ = "video_metric_snapshots"
+    __table_args__ = (UniqueConstraint("youtube_video_id", "analytics_start_date", "analytics_end_date", name="uq_video_metric_period"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     youtube_video_id: Mapped[str] = mapped_column(String(32), index=True)

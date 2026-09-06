@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date
 import json
 from typing import Any
+from dataclasses import asdict, is_dataclass
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -42,7 +43,9 @@ class MetricSnapshotInput:
 
 def normalize_metrics(raw: dict[str, Any]) -> MetricSnapshotInput:
     """Convert API units to one internal convention: ratios are 0..1, gaps are None."""
-    traffic = raw.get("traffic") or {}
+    if is_dataclass(raw):
+        raw = asdict(raw)
+    traffic = raw.get("traffic") or raw.get("traffic_raw") or {}
     views = _as_int(raw.get("views"))
     subscribers_gained = _as_int(raw.get("subscribers_gained"))
     retention = raw.get("retention")
@@ -53,18 +56,18 @@ def normalize_metrics(raw: dict[str, Any]) -> MetricSnapshotInput:
         ctr=_as_ratio(raw.get("ctr")),
         watch_minutes=_as_float(raw.get("watch_minutes")),
         avg_view_duration_seconds=_as_float(raw.get("avg_view_duration_seconds")),
-        average_percentage_viewed=_as_ratio(raw.get("average_percentage_viewed")),
+        average_percentage_viewed=_percent_to_ratio(raw.get("average_percentage_viewed")),
         subscribers_gained=subscribers_gained,
         subscriber_conversion_rate=(
             subscribers_gained / views
             if subscribers_gained is not None and views is not None and views > 0
             else None
         ),
-        browse_share=_as_ratio(traffic.get("BROWSE")),
-        suggested_share=_as_ratio(traffic.get("SUGGESTED")),
-        search_share=_as_ratio(traffic.get("SEARCH")),
-        external_share=_as_ratio(traffic.get("EXTERNAL")),
-        shorts_feed_share=_as_ratio(traffic.get("SHORTS")),
+        browse_share=None,
+        suggested_share=_traffic_share(traffic, "RELATED_VIDEO"),
+        search_share=_traffic_share(traffic, "YT_SEARCH"),
+        external_share=_traffic_share(traffic, "EXT_URL"),
+        shorts_feed_share=_traffic_share(traffic, "SHORTS"),
         returning_viewers=_as_int(raw.get("returning_viewers")),
         retention=_normalize_retention(retention),
         views_1h=_as_int(raw.get("views_1h")),
@@ -96,13 +99,24 @@ def _as_ratio(value: Any) -> float | None:
     return round(number / 100, 6) if number > 1 else number
 
 
+def _percent_to_ratio(value: Any) -> float | None:
+    return None if value is None else float(value) / 100
+
+
+def _traffic_share(traffic: dict[str, Any], source: str) -> float | None:
+    if source not in traffic:
+        return None
+    total = sum(float(value) for value in traffic.values())
+    return float(traffic[source]) / total if total else None
+
+
 def _normalize_retention(points: Any) -> list[dict[str, float]] | None:
     if points is None:
         return None
     return [
         {
             "elapsed_ratio": float(point["elapsed_ratio"]),
-            "audience_retention": _as_ratio(point.get("audience_retention")),
+            "audience_retention": float(point.get("audienceWatchRatio", point.get("audience_retention"))),
         }
         for point in points
     ]

@@ -1,12 +1,4 @@
-.worktrees/
-.superpowers/
-.env
-.venv/
+youtube-token.json
+*.oauth-state
+*.consumed
 __pycache__/
-.pytest_cache/
-*.pyc
-*.db
-node_modules/
-dist/
-coverage/
-
