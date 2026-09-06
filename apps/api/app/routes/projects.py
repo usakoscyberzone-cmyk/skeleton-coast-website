@@ -41,4 +41,8 @@ def scan_projects(session: Session = Depends(get_session)) -> list[Project]:
 
 @router.get("", response_model=list[ProjectRead])
 def list_projects(session: Session = Depends(get_session)) -> list[Project]:
-    return list(session.scalars(select(Project).order_by(func.lower(Project.name))))
+    return list(
+        session.scalars(
+            select(Project).order_by(func.lower(Project.name), Project.name, Project.id)
+        )
+    )

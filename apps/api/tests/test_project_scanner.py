@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 import app.db as database
 import app.main as main_module
@@ -7,6 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.config import get_settings
+from app.models import Project
 from app.main import create_app
 from app.services.project_scanner import ensure_project_structure, scan_master_folder
 
@@ -79,3 +81,62 @@ def test_scan_endpoint_persists_projects_and_get_returns_name_order(tmp_path: Pa
     )
 
     get_settings.cache_clear()
+
+
+def test_scan_endpoint_ignores_linked_project_outside_master(tmp_path: Path, monkeypatch):
+    master_folder = tmp_path / "YouTube Projects"
+    master_folder.mkdir()
+    outside_folder = tmp_path / "outside-master"
+    outside_folder.mkdir()
+    linked_project = master_folder / "Linked Project"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(linked_project), str(outside_folder)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    monkeypatch.setenv("MASTER_PROJECT_FOLDER", str(master_folder))
+    get_settings.cache_clear()
+    test_engine = create_engine(
+        f"sqlite:///{tmp_path / 'linked-project.db'}", connect_args={"check_same_thread": False}
+    )
+    monkeypatch.setattr(database, "engine", test_engine)
+    monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=test_engine))
+    monkeypatch.setattr(main_module, "engine", test_engine)
+    database.Base.metadata.create_all(bind=test_engine)
+
+    with TestClient(create_app()) as client:
+        response = client.post("/projects/scan")
+
+    assert response.status_code == 200
+    assert response.json() == []
+    assert not any(
+        (outside_folder / name).exists()
+        for name in ("Thumbnails", "Shorts", "Captions", "Metadata", "Analytics", "Exports")
+    )
+
+    get_settings.cache_clear()
+
+
+def test_list_projects_breaks_casefold_ties_by_name_then_id(tmp_path: Path, monkeypatch):
+    test_engine = create_engine(
+        f"sqlite:///{tmp_path / 'ordering.db'}", connect_args={"check_same_thread": False}
+    )
+    monkeypatch.setattr(database, "engine", test_engine)
+    monkeypatch.setattr(database, "SessionLocal", sessionmaker(bind=test_engine))
+    monkeypatch.setattr(main_module, "engine", test_engine)
+    database.Base.metadata.create_all(bind=test_engine)
+    with database.SessionLocal() as session:
+        session.add_all(
+            [
+                Project(name="alpha", path=str(tmp_path / "first")),
+                Project(name="Alpha", path=str(tmp_path / "second")),
+            ]
+        )
+        session.commit()
+
+    with TestClient(create_app()) as client:
+        response = client.get("/projects")
+
+    assert response.status_code == 200
+    assert [project["name"] for project in response.json()] == ["Alpha", "alpha"]
