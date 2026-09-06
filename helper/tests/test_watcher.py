@@ -250,6 +250,47 @@ def test_delayed_sync_reports_error_without_raising_from_timer(tmp_path: Path):
     assert str(errors[0]) == "API unavailable"
 
 
+def test_delayed_sync_isolates_a_failing_error_callback(tmp_path: Path):
+    master = tmp_path / "YouTube Projects"
+    master.mkdir()
+    timers: list[ManualTimer] = []
+    observer = RecordingObserver()
+    successful_syncs: list[str] = []
+    fail_delayed_sync = False
+
+    def sync(api_base_url: str):
+        if fail_delayed_sync:
+            raise RuntimeError("API unavailable")
+        successful_syncs.append(api_base_url)
+
+    def failing_error_callback(_: Exception):
+        raise RuntimeError("logger unavailable")
+
+    watcher = ProjectFolderWatcher(
+        master,
+        "http://127.0.0.1:8000",
+        sync=sync,
+        observer_factory=lambda: observer,
+        timer_factory=make_timer_factory(timers),
+        on_error=failing_error_callback,
+    )
+    watcher.start()
+    fail_delayed_sync = True
+    watcher.handle_directory_created(master / "New Project")
+
+    timers[0].fire()
+
+    fail_delayed_sync = False
+    watcher.handle_directory_created(master / "Another Project")
+    timers[1].fire()
+    watcher.stop()
+
+    assert successful_syncs == [
+        "http://127.0.0.1:8000",
+        "http://127.0.0.1:8000",
+    ]
+
+
 def test_start_stops_observer_if_immediate_sync_fails(tmp_path: Path):
     master = tmp_path / "YouTube Projects"
     master.mkdir()

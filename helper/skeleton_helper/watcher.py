@@ -102,7 +102,18 @@ class ProjectFolderWatcher:
             except Exception as caught_error:
                 error = caught_error
         if error is not None:
-            self.on_error(error)
+            try:
+                self.on_error(error)
+            except Exception as callback_error:
+                logger.error(
+                    "Delayed synchronization error callback failed: %s",
+                    callback_error,
+                    exc_info=(
+                        type(callback_error),
+                        callback_error,
+                        callback_error.__traceback__,
+                    ),
+                )
 
     def stop(self) -> None:
         with self._lock:
