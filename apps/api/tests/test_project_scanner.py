@@ -44,6 +44,22 @@ def test_scan_master_folder_returns_no_projects_when_root_is_missing(tmp_path: P
     assert scan_master_folder(tmp_path / "missing") == []
 
 
+def test_scan_master_folder_breaks_unicode_casefold_ties_by_name_then_path(tmp_path: Path):
+    theta_symbol = tmp_path / "\u03d1 Project"
+    theta_capital = tmp_path / "\u03f4 Project"
+    theta_capital.mkdir()
+    theta_symbol.mkdir()
+
+    result = scan_master_folder(tmp_path)
+
+    assert [
+        (project.name.casefold(), project.name, str(project.path)) for project in result
+    ] == [
+        ("\u03b8 project", "\u03d1 Project", str(theta_symbol.resolve())),
+        ("\u03b8 project", "\u03f4 Project", str(theta_capital.resolve())),
+    ]
+
+
 def test_scan_endpoint_persists_projects_and_get_returns_name_order(tmp_path: Path, monkeypatch):
     master_folder = tmp_path / "YouTube Projects"
     (master_folder / "Pilchard Mortality").mkdir(parents=True)
