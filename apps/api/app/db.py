@@ -28,6 +28,9 @@ def get_session() -> Iterator[Session]:
 
 
 def upgrade_media_files_schema(bind) -> None:
+    if bind.dialect.name != "sqlite":
+        return
+
     connection = bind.connect()
     try:
         connection.exec_driver_sql("BEGIN IMMEDIATE")

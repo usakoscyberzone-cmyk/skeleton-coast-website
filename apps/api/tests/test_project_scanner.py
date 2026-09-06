@@ -11,7 +11,7 @@ import app.main as main_module
 import app.routes.projects as projects_route
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -424,13 +424,27 @@ def test_upgrade_media_files_schema_deduplicates_legacy_rows_and_adds_unique_ind
     )
 
 
-def test_upgrade_media_files_schema_serializes_concurrent_legacy_startups(
-    tmp_path: Path, monkeypatch
-):
-    """Breaks if two startup connections both add the legacy probe_error column."""
+def test_upgrade_media_files_schema_is_a_no_op_for_non_sqlite_bind():
+    """Breaks if the SQLite legacy upgrade connects to another database dialect."""
     from app.db import upgrade_media_files_schema
 
-    database_path = tmp_path / "concurrent-legacy.db"
+    class RejectingNonSqliteBind:
+        class dialect:
+            name = "postgresql"
+
+        def connect(self):
+            pytest.fail("non-SQLite legacy upgrade attempted to connect")
+
+    upgrade_media_files_schema(RejectingNonSqliteBind())
+
+
+def test_upgrade_media_files_schema_locks_each_connection_before_introspection(
+    tmp_path: Path, monkeypatch
+):
+    """Breaks if concurrent startup inspects either connection before its write lock."""
+    from app.db import upgrade_media_files_schema
+
+    database_path = tmp_path / "ordered-concurrent-legacy.db"
     upgrade_engine = create_engine(
         f"sqlite:///{database_path}", connect_args={"check_same_thread": False}
     )
@@ -442,20 +456,43 @@ def test_upgrade_media_files_schema_serializes_concurrent_legacy_startups(
         )
 
     original_inspect = database.inspect
-    pre_transaction_barrier = Barrier(2)
+    pre_lock_inspection_barrier = Barrier(2)
+    event_lock = Lock()
+    events_by_connection: dict[int, list[str]] = {}
 
-    def synchronize_pre_transaction_inspection(bind):
-        inspected = original_inspect(bind)
-        if bind is upgrade_engine:
-            pre_transaction_barrier.wait(timeout=5)
-        return inspected
+    def record_begin_immediate(
+        connection, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        if statement.strip().upper() != "BEGIN IMMEDIATE":
+            return
+        with event_lock:
+            events_by_connection.setdefault(id(connection), []).append(
+                "begin_immediate"
+            )
 
-    monkeypatch.setattr(database, "inspect", synchronize_pre_transaction_inspection)
+    def instrument_inspection(bind):
+        if bind is not upgrade_engine and getattr(bind, "engine", None) is upgrade_engine:
+            with event_lock:
+                connection_events = events_by_connection.setdefault(id(bind), [])
+                inspected_before_lock = "begin_immediate" not in connection_events
+                connection_events.append("inspect")
+            if inspected_before_lock:
+                pre_lock_inspection_barrier.wait(timeout=5)
+        return original_inspect(bind)
+
+    event.listen(upgrade_engine, "before_cursor_execute", record_begin_immediate)
+    monkeypatch.setattr(database, "inspect", instrument_inspection)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(upgrade_media_files_schema, upgrade_engine) for _ in range(2)]
         for future in futures:
             future.result(timeout=5)
+
+    assert len(events_by_connection) == 2
+    assert all(
+        connection_events[:2] == ["begin_immediate", "inspect"]
+        for connection_events in events_by_connection.values()
+    )
 
     with upgrade_engine.connect() as connection:
         columns = {
