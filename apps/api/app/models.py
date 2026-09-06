@@ -1,7 +1,8 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import TypeDecorator
 
 from .db import Base
 
@@ -31,9 +32,23 @@ class MediaFile(Base):
     probe_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class UTCDateTime(TypeDecorator):
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("UTC datetime must be timezone-aware")
+        return value.astimezone(UTC).replace(tzinfo=None)
+
+    def process_result_value(self, value, dialect):
+        return value.replace(tzinfo=UTC) if value is not None else None
+
+
 class VideoMetricSnapshot(Base):
     __tablename__ = "video_metric_snapshots"
-    __table_args__ = (UniqueConstraint("youtube_video_id", "analytics_start_date", "analytics_end_date", name="uq_video_metric_period"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     youtube_video_id: Mapped[str] = mapped_column(String(32), index=True)
@@ -41,7 +56,7 @@ class VideoMetricSnapshot(Base):
     analytics_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     analytics_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     length_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     video_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -65,6 +80,15 @@ class VideoMetricSnapshot(Base):
     views_1h: Mapped[int | None] = mapped_column(Integer, nullable=True)
     views_24h: Mapped[int | None] = mapped_column(Integer, nullable=True)
     views_7d: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+Index(
+    "uq_video_metric_period",
+    VideoMetricSnapshot.youtube_video_id,
+    func.coalesce(VideoMetricSnapshot.analytics_start_date, ""),
+    func.coalesce(VideoMetricSnapshot.analytics_end_date, ""),
+    unique=True,
+)
 
 
 class Recommendation(Base):

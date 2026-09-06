@@ -7,10 +7,12 @@ from typing import Any
 from dataclasses import asdict, is_dataclass
 
 from sqlalchemy import select
+from sqlalchemy import literal_column
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..models import VideoMetricSnapshot
+from .youtube_client import RawVideoMetrics
 
 
 @dataclass(frozen=True)
@@ -43,14 +45,16 @@ class MetricSnapshotInput:
     published_at: datetime | None = None
 
 
-def normalize_metrics(raw: "RawVideoMetrics | dict[str, Any]") -> MetricSnapshotInput:
+def normalize_metrics(raw: RawVideoMetrics | dict[str, object]) -> MetricSnapshotInput:
     """Convert API units to one internal convention: ratios are 0..1, gaps are None."""
     if is_dataclass(raw):
         raw = asdict(raw)
     ctr = raw.get("ctr")
     if ctr is not None and not 0 <= float(ctr) <= 1:
         raise ValueError("CTR must be a normalized ratio between 0 and 1")
-    traffic = raw.get("traffic") or raw.get("traffic_raw") or {}
+    supplied_raw = raw.get("traffic_raw")
+    traffic = supplied_raw or raw.get("traffic") or {}
+    live_traffic = bool(supplied_raw) or any(key in traffic for key in ("RELATED_VIDEO", "YT_SEARCH", "EXT_URL"))
     views = _as_int(raw.get("views"))
     subscribers_gained = _as_int(raw.get("subscribers_gained"))
     retention = raw.get("retention")
@@ -68,11 +72,11 @@ def normalize_metrics(raw: "RawVideoMetrics | dict[str, Any]") -> MetricSnapshot
             if subscribers_gained is not None and views is not None and views > 0
             else None
         ),
-        browse_share=_normalized_share(traffic, "BROWSE"),
-        suggested_share=_normalized_share(traffic, "SUGGESTED") if "SUGGESTED" in traffic else _traffic_share(traffic, "RELATED_VIDEO"),
-        search_share=_normalized_share(traffic, "SEARCH") if "SEARCH" in traffic else _traffic_share(traffic, "YT_SEARCH"),
-        external_share=_normalized_share(traffic, "EXTERNAL") if "EXTERNAL" in traffic else _traffic_share(traffic, "EXT_URL"),
-        shorts_feed_share=_normalized_share(traffic, "SHORTS") if "SHORTS" in traffic and all(float(v) <= 1 for v in traffic.values()) else _traffic_share(traffic, "SHORTS"),
+        browse_share=_traffic_share(traffic, "BROWSE") if live_traffic else _normalized_share(traffic, "BROWSE"),
+        suggested_share=_traffic_share(traffic, "RELATED_VIDEO") if live_traffic else _normalized_share(traffic, "SUGGESTED"),
+        search_share=_traffic_share(traffic, "YT_SEARCH") if live_traffic else _normalized_share(traffic, "SEARCH"),
+        external_share=_traffic_share(traffic, "EXT_URL") if live_traffic else _normalized_share(traffic, "EXTERNAL"),
+        shorts_feed_share=_traffic_share(traffic, "SHORTS") if live_traffic else _normalized_share(traffic, "SHORTS"),
         returning_viewers=_as_int(raw.get("returning_viewers")),
         retention=_normalize_retention(retention),
         views_1h=_as_int(raw.get("views_1h")),
@@ -143,7 +147,7 @@ def persist_metric_snapshot(
     }
     values["retention_json"] = json.dumps(metric.retention) if metric.retention is not None else None
     statement = sqlite_insert(VideoMetricSnapshot).values(youtube_video_id=metric.youtube_video_id, analytics_start_date=start_date, analytics_end_date=end_date, **values)
-    session.execute(statement.on_conflict_do_update(index_elements=["youtube_video_id", "analytics_start_date", "analytics_end_date"], set_=values))
-    snapshot = session.scalar(select(VideoMetricSnapshot).where(VideoMetricSnapshot.youtube_video_id == metric.youtube_video_id, VideoMetricSnapshot.analytics_start_date == start_date, VideoMetricSnapshot.analytics_end_date == end_date))
+    session.execute(statement.on_conflict_do_update(index_elements=[VideoMetricSnapshot.youtube_video_id, literal_column("coalesce(analytics_start_date, '')"), literal_column("coalesce(analytics_end_date, '')")], set_=values))
+    snapshot = session.scalar(select(VideoMetricSnapshot).where(VideoMetricSnapshot.youtube_video_id == metric.youtube_video_id, VideoMetricSnapshot.analytics_start_date.is_(start_date) if start_date is None else VideoMetricSnapshot.analytics_start_date == start_date, VideoMetricSnapshot.analytics_end_date.is_(end_date) if end_date is None else VideoMetricSnapshot.analytics_end_date == end_date))
     session.flush()
     return snapshot
