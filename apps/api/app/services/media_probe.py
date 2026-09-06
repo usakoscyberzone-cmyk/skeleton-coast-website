@@ -126,10 +126,15 @@ def _as_finite_float(value: Any) -> float | None:
 def _as_positive_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
-    try:
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
         parsed = int(value)
-    except (TypeError, ValueError):
-        return None
+    else:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
     return parsed if parsed > 0 else None
 
 

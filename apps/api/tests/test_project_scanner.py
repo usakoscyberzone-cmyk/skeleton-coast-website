@@ -1,10 +1,16 @@
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import subprocess
+from threading import Lock
+import time
 
 import app.db as database
 import app.main as main_module
+import app.routes.projects as projects_route
+import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from app.config import get_settings
@@ -214,6 +220,135 @@ def test_scan_media_files_continues_when_one_probe_returns_an_error(
         ("broken.mp4", "ffprobe_failed"),
         ("usable.mp4", None),
     ]
+
+
+def test_scan_media_files_rejects_junction_targets_and_case_variant_output_roots(
+    tmp_path: Path, monkeypatch
+):
+    """Breaks if a reparse point leaves the project or generated files re-enter scans."""
+    project = tmp_path / "Project"
+    project.mkdir()
+    local_file = project / "source.mp4"
+    local_file.write_bytes(b"source")
+    generated_dir = project / "thumbnails"
+    generated_dir.mkdir()
+    (generated_dir / "generated.jpg").write_bytes(b"generated")
+    external_target = tmp_path / "outside-project"
+    external_target.mkdir()
+    external_file = external_target / "outside.mp4"
+    external_file.write_bytes(b"outside")
+    external_junction = project / "External"
+
+    def fake_walk(_: Path, *, topdown: bool):
+        assert topdown is True
+        return iter(
+            [
+                (
+                    str(project),
+                    ["thumbnails", "External"],
+                    ["source.mp4", "escaped.mp4"],
+                ),
+                (str(generated_dir), [], ["generated.jpg"]),
+                (str(external_junction), [], ["outside.mp4"]),
+            ]
+        )
+
+    monkeypatch.setattr(project_scanner.os, "walk", fake_walk)
+    monkeypatch.setattr(
+        project_scanner.os.path,
+        "isjunction",
+        lambda path: Path(path) == external_junction,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        project_scanner.Path,
+        "resolve",
+        lambda path: external_target / "outside.mp4"
+        if path in {external_junction / "outside.mp4", project / "escaped.mp4"}
+        else Path(path),
+    )
+
+    result = scan_media_files(project)
+
+    assert [item.path for item in result] == [local_file]
+
+
+def test_scan_media_files_does_not_treat_the_project_root_as_generated_output(
+    tmp_path: Path, monkeypatch
+):
+    """Breaks if an otherwise valid project name happens to match an output folder."""
+    project = tmp_path / "Thumbnails"
+    project.mkdir()
+    source = project / "source.mp4"
+    source.write_bytes(b"source")
+    monkeypatch.setattr(
+        project_scanner,
+        "probe_media",
+        lambda path: MediaProbeResult(path=path, kind="video"),
+    )
+
+    result = scan_media_files(project)
+
+    assert [item.path for item in result] == [source]
+
+
+def test_media_files_have_a_database_unique_constraint_for_project_path(tmp_path: Path):
+    """Breaks if a concurrent scan can create duplicate rows for one source path."""
+    test_engine = create_engine(
+        f"sqlite:///{tmp_path / 'constraint.db'}", connect_args={"check_same_thread": False}
+    )
+    database.Base.metadata.create_all(bind=test_engine)
+
+    constraints = inspect(test_engine).get_unique_constraints("media_files")
+
+    assert any(
+        constraint["column_names"] == ["project_id", "path"] for constraint in constraints
+    )
+    with database.SessionLocal(bind=test_engine) as session:
+        project = Project(name="Project", path=str(tmp_path / "Project"))
+        session.add(project)
+        session.flush()
+        session.add_all(
+            [
+                MediaFile(project_id=project.id, path="C:/media/reel.mp4", kind="video"),
+                MediaFile(project_id=project.id, path="C:/media/reel.mp4", kind="video"),
+            ]
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+
+
+def test_scan_projects_serializes_in_process_scans(tmp_path: Path, monkeypatch):
+    """Breaks if overlapping API scans can interleave stale-row reconciliation."""
+    test_engine = create_engine(
+        f"sqlite:///{tmp_path / 'serialized.db'}", connect_args={"check_same_thread": False}
+    )
+    database.Base.metadata.create_all(bind=test_engine)
+    active_scans = 0
+    max_active_scans = 0
+    active_lock = Lock()
+
+    def slow_discovery(_: Path):
+        nonlocal active_scans, max_active_scans
+        with active_lock:
+            active_scans += 1
+            max_active_scans = max(max_active_scans, active_scans)
+        time.sleep(0.05)
+        with active_lock:
+            active_scans -= 1
+        return []
+
+    monkeypatch.setattr(projects_route, "scan_master_folder", slow_discovery)
+    test_sessions = sessionmaker(bind=test_engine)
+
+    def invoke_scan() -> None:
+        with test_sessions() as session:
+            projects_route.scan_projects(session)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(lambda _: invoke_scan(), range(2)))
+
+    assert max_active_scans == 1
 
 
 def test_project_scan_upserts_media_removes_stale_rows_and_exposes_probe_errors(

@@ -51,16 +51,32 @@ def scan_media_files(project_path: Path) -> list[MediaProbeResult]:
     if not project_path.is_dir():
         return []
 
+    resolved_project = _resolve_path(project_path)
+    if resolved_project is None:
+        return []
     source_files: list[Path] = []
     for root, directories, filenames in os.walk(project_path, topdown=True):
         root_path = Path(root)
-        if root_path == project_path:
-            directories[:] = [
-                directory for directory in directories if directory not in OUTPUT_DIRS
-            ]
+        if root_path != project_path and _should_skip_directory(
+            root_path, resolved_project
+        ):
+            directories[:] = []
+            continue
+        directories[:] = [
+            directory
+            for directory in directories
+            if not _should_skip_directory(root_path / directory, resolved_project)
+        ]
         for filename in filenames:
             path = root_path / filename
-            if path.is_symlink() or media_kind(path) is None:
+            resolved_path = _resolve_path(path)
+            if (
+                path.is_symlink()
+                or _is_junction(path)
+                or resolved_path is None
+                or not _is_within(resolved_path, resolved_project)
+                or media_kind(path) is None
+            ):
                 continue
             source_files.append(path)
 
@@ -93,3 +109,33 @@ def scan_media_files(project_path: Path) -> list[MediaProbeResult]:
                 )
             )
     return results
+
+
+def _should_skip_directory(path: Path, resolved_project: Path) -> bool:
+    return (
+        path.name.casefold() in {name.casefold() for name in OUTPUT_DIRS}
+        or path.is_symlink()
+        or _is_junction(path)
+        or (resolved_path := _resolve_path(path)) is None
+        or not _is_within(resolved_path, resolved_project)
+    )
+
+
+def _is_junction(path: Path) -> bool:
+    is_junction = getattr(os.path, "isjunction", lambda _: False)
+    return is_junction(path)
+
+
+def _resolve_path(path: Path) -> Path | None:
+    try:
+        return path.resolve()
+    except OSError:
+        return None
+
+
+def _is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True

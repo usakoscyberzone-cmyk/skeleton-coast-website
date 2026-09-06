@@ -119,6 +119,28 @@ def test_parse_ffprobe_payload_accepts_absent_duration_and_frame_rate():
     assert result.frame_rate is None
 
 
+def test_parse_ffprobe_payload_rejects_fractional_dimensions():
+    """Breaks if malformed dimensions are silently truncated before persistence."""
+    result = parse_ffprobe_payload(
+        Path("fractional.mp4"),
+        {
+            "format": {"duration": "1"},
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1920.9,
+                    "height": "1080.5",
+                    "avg_frame_rate": "24/1",
+                }
+            ],
+        },
+    )
+
+    assert result.width is None
+    assert result.height is None
+
+
 @pytest.mark.parametrize(
     ("filename", "expected_kind"),
     [

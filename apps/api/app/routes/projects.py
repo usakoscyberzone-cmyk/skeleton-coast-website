@@ -1,7 +1,9 @@
 from pathlib import Path
+from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -17,32 +19,34 @@ from ..services.media_probe import MediaProbeResult
 
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+_PROJECT_SCAN_LOCK = Lock()
 
 
 @router.post("/scan", response_model=list[ProjectRead])
 def scan_projects(session: Session = Depends(get_session)) -> list[Project]:
     master_folder = Path(get_settings().master_project_folder)
-    projects = scan_master_folder(master_folder)
-    persisted_projects = []
+    with _PROJECT_SCAN_LOCK:
+        projects = scan_master_folder(master_folder)
+        persisted_projects = []
 
-    for project in projects:
-        ensure_project_structure(project.path)
-        absolute_path = str(project.path.resolve())
-        persisted_project = session.scalar(
-            select(Project).where(Project.path == absolute_path)
-        )
-        if persisted_project is None:
-            persisted_project = Project(name=project.name, path=absolute_path)
-            session.add(persisted_project)
-        else:
-            persisted_project.name = project.name
-        session.flush()
-        _persist_media_files(session, persisted_project, scan_media_files(project.path))
-        persisted_projects.append(persisted_project)
+        for project in projects:
+            ensure_project_structure(project.path)
+            absolute_path = str(project.path.resolve())
+            persisted_project = session.scalar(
+                select(Project).where(Project.path == absolute_path)
+            )
+            if persisted_project is None:
+                persisted_project = Project(name=project.name, path=absolute_path)
+                session.add(persisted_project)
+            else:
+                persisted_project.name = project.name
+            session.flush()
+            _persist_media_files(session, persisted_project, scan_media_files(project.path))
+            persisted_projects.append(persisted_project)
 
-    session.commit()
-    for project in persisted_projects:
-        session.refresh(project)
+        session.commit()
+        for project in persisted_projects:
+            session.refresh(project)
     return persisted_projects
 
 
@@ -78,25 +82,33 @@ def get_project(project_id: int, session: Session = Depends(get_session)) -> Pro
 def _persist_media_files(
     session: Session, project: Project, media_results: list[MediaProbeResult]
 ) -> None:
-    existing_media = list(
-        session.scalars(select(MediaFile).where(MediaFile.project_id == project.id))
-    )
-    by_path = {media_file.path: media_file for media_file in existing_media}
     seen_paths = set()
     for result in media_results:
         absolute_path = str(result.path.resolve())
         seen_paths.add(absolute_path)
-        media_file = by_path.get(absolute_path)
-        if media_file is None:
-            media_file = MediaFile(project_id=project.id, path=absolute_path, kind=result.kind)
-            session.add(media_file)
-        media_file.kind = result.kind
-        media_file.duration_seconds = result.duration_seconds
-        media_file.width = result.width
-        media_file.height = result.height
-        media_file.frame_rate = result.frame_rate
-        media_file.codec = result.codec
-        media_file.probe_error = result.probe_error
-    for media_file in existing_media:
-        if media_file.path not in seen_paths:
-            session.delete(media_file)
+        values = {
+            "project_id": project.id,
+            "path": absolute_path,
+            "kind": result.kind,
+            "duration_seconds": result.duration_seconds,
+            "width": result.width,
+            "height": result.height,
+            "frame_rate": result.frame_rate,
+            "codec": result.codec,
+            "probe_error": result.probe_error,
+        }
+        insert_statement = sqlite_insert(MediaFile).values(**values)
+        session.execute(
+            insert_statement.on_conflict_do_update(
+                index_elements=[MediaFile.project_id, MediaFile.path],
+                set_={
+                    key: getattr(insert_statement.excluded, key)
+                    for key in values
+                    if key not in {"project_id", "path"}
+                },
+            )
+        )
+    stale_media = delete(MediaFile).where(MediaFile.project_id == project.id)
+    if seen_paths:
+        stale_media = stale_media.where(MediaFile.path.not_in(seen_paths))
+    session.execute(stale_media)
