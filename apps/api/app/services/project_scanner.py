@@ -6,6 +6,7 @@ from .media_probe import MediaProbeResult, media_kind, probe_media
 
 
 OUTPUT_DIRS = ("Thumbnails", "Shorts", "Captions", "Metadata", "Analytics", "Exports")
+OUTPUT_DIR_NAMES = frozenset(name.casefold() for name in OUTPUT_DIRS)
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,11 @@ def scan_master_folder(master_folder: Path) -> list[ProjectScan]:
 
 
 def scan_media_files(project_path: Path) -> list[MediaProbeResult]:
-    if not project_path.is_dir():
+    if (
+        not project_path.is_dir()
+        or project_path.is_symlink()
+        or _is_junction(project_path)
+    ):
         return []
 
     resolved_project = _resolve_path(project_path)
@@ -57,8 +62,10 @@ def scan_media_files(project_path: Path) -> list[MediaProbeResult]:
     source_files: list[Path] = []
     for root, directories, filenames in os.walk(project_path, topdown=True):
         root_path = Path(root)
-        if root_path != project_path and _should_skip_directory(
-            root_path, resolved_project
+        if _should_skip_directory(
+            root_path,
+            resolved_project,
+            include_generated_name=root_path != project_path,
         ):
             directories[:] = []
             continue
@@ -111,9 +118,11 @@ def scan_media_files(project_path: Path) -> list[MediaProbeResult]:
     return results
 
 
-def _should_skip_directory(path: Path, resolved_project: Path) -> bool:
+def _should_skip_directory(
+    path: Path, resolved_project: Path, *, include_generated_name: bool = True
+) -> bool:
     return (
-        path.name.casefold() in {name.casefold() for name in OUTPUT_DIRS}
+        (include_generated_name and path.name.casefold() in OUTPUT_DIR_NAMES)
         or path.is_symlink()
         or _is_junction(path)
         or (resolved_path := _resolve_path(path)) is None

@@ -1,7 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 from pathlib import Path
+import sqlite3
 import subprocess
-from threading import Lock
+from threading import Lock, Timer
 import time
 
 import app.db as database
@@ -23,6 +25,17 @@ from app.services.project_scanner import (
     scan_master_folder,
     scan_media_files,
 )
+
+
+def _hold_sqlite_immediate_lock(database_path: str, ready, release) -> None:
+    connection = sqlite3.connect(database_path, timeout=0)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        ready.set()
+        release.wait(5)
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def test_ensure_project_structure_creates_expected_directories(tmp_path: Path):
@@ -292,6 +305,26 @@ def test_scan_media_files_does_not_treat_the_project_root_as_generated_output(
     assert [item.path for item in result] == [source]
 
 
+def test_scan_media_files_rejects_a_junction_project_root_named_like_output(
+    tmp_path: Path, monkeypatch
+):
+    """Breaks if a swapped project root can redirect a source scan outside master."""
+    project = tmp_path / "Thumbnails"
+    project.mkdir()
+    source = project / "source.mp4"
+    source.write_bytes(b"source")
+    monkeypatch.setattr(
+        project_scanner.os.path,
+        "isjunction",
+        lambda path: Path(path) == project,
+        raising=False,
+    )
+
+    result = scan_media_files(project)
+
+    assert result == []
+
+
 def test_media_files_have_a_database_unique_constraint_for_project_path(tmp_path: Path):
     """Breaks if a concurrent scan can create duplicate rows for one source path."""
     test_engine = create_engine(
@@ -349,6 +382,80 @@ def test_scan_projects_serializes_in_process_scans(tmp_path: Path, monkeypatch):
         list(executor.map(lambda _: invoke_scan(), range(2)))
 
     assert max_active_scans == 1
+
+
+def test_upgrade_media_files_schema_deduplicates_legacy_rows_and_adds_unique_index(
+    tmp_path: Path,
+):
+    """Breaks if a database created before Task 4 cannot use media ON CONFLICT."""
+    from app.db import upgrade_media_files_schema
+
+    database_path = tmp_path / "legacy.db"
+    legacy_engine = create_engine(f"sqlite:///{database_path}")
+    with legacy_engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE media_files ("
+            "id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, path TEXT NOT NULL, "
+            "kind TEXT NOT NULL, duration_seconds FLOAT, width INTEGER, height INTEGER, "
+            "frame_rate FLOAT, codec TEXT)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO media_files (id, project_id, path, kind) "
+            "VALUES (1, 7, 'C:/media/reel.mp4', 'video'), "
+            "(2, 7, 'C:/media/reel.mp4', 'video')"
+        )
+
+    upgrade_media_files_schema(legacy_engine)
+
+    with legacy_engine.connect() as connection:
+        rows = connection.exec_driver_sql(
+            "SELECT id FROM media_files WHERE project_id = 7 AND path = 'C:/media/reel.mp4'"
+        ).all()
+        columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(media_files)")
+        }
+    unique_indexes = inspect(legacy_engine).get_indexes("media_files")
+
+    assert rows == [(1,)]
+    assert "probe_error" in columns
+    assert any(
+        index["unique"] and index["column_names"] == ["project_id", "path"]
+        for index in unique_indexes
+    )
+
+
+def test_begin_immediate_transaction_waits_for_a_separate_process_lock(tmp_path: Path):
+    """Breaks if two API workers can write scans at the same time."""
+    from app.db import begin_immediate_transaction
+
+    database_path = tmp_path / "process-lock.db"
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    holder = context.Process(
+        target=_hold_sqlite_immediate_lock,
+        args=(str(database_path), ready, release),
+    )
+    holder.start()
+    try:
+        assert ready.wait(5)
+        release_timer = Timer(0.1, release.set)
+        release_timer.start()
+        lock_engine = create_engine(
+            f"sqlite:///{database_path}", connect_args={"timeout": 0}
+        )
+        with sessionmaker(bind=lock_engine)() as session:
+            begin_immediate_transaction(session, max_attempts=20, retry_delay_seconds=0.02)
+            session.rollback()
+        release_timer.join()
+    finally:
+        release.set()
+        holder.join(5)
+        if holder.is_alive():
+            holder.terminate()
+            holder.join()
+
+    assert holder.exitcode == 0
 
 
 def test_project_scan_upserts_media_removes_stale_rows_and_exposes_probe_errors(

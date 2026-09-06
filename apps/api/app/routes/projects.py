@@ -1,5 +1,4 @@
 from pathlib import Path
-from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete, func, select
@@ -7,7 +6,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..db import get_session
+from ..db import begin_immediate_transaction, get_session
 from ..models import MediaFile, Project
 from ..schemas import MediaFileRead, ProjectDetailRead, ProjectRead
 from ..services.project_scanner import (
@@ -19,34 +18,33 @@ from ..services.media_probe import MediaProbeResult
 
 
 router = APIRouter(prefix="/projects", tags=["projects"])
-_PROJECT_SCAN_LOCK = Lock()
 
 
 @router.post("/scan", response_model=list[ProjectRead])
 def scan_projects(session: Session = Depends(get_session)) -> list[Project]:
     master_folder = Path(get_settings().master_project_folder)
-    with _PROJECT_SCAN_LOCK:
-        projects = scan_master_folder(master_folder)
-        persisted_projects = []
+    begin_immediate_transaction(session)
+    projects = scan_master_folder(master_folder)
+    persisted_projects = []
 
-        for project in projects:
-            ensure_project_structure(project.path)
-            absolute_path = str(project.path.resolve())
-            persisted_project = session.scalar(
-                select(Project).where(Project.path == absolute_path)
-            )
-            if persisted_project is None:
-                persisted_project = Project(name=project.name, path=absolute_path)
-                session.add(persisted_project)
-            else:
-                persisted_project.name = project.name
-            session.flush()
-            _persist_media_files(session, persisted_project, scan_media_files(project.path))
-            persisted_projects.append(persisted_project)
+    for project in projects:
+        ensure_project_structure(project.path)
+        absolute_path = str(project.path.resolve())
+        persisted_project = session.scalar(
+            select(Project).where(Project.path == absolute_path)
+        )
+        if persisted_project is None:
+            persisted_project = Project(name=project.name, path=absolute_path)
+            session.add(persisted_project)
+        else:
+            persisted_project.name = project.name
+        session.flush()
+        _persist_media_files(session, persisted_project, scan_media_files(project.path))
+        persisted_projects.append(persisted_project)
 
-        session.commit()
-        for project in persisted_projects:
-            session.refresh(project)
+    session.commit()
+    for project in persisted_projects:
+        session.refresh(project)
     return persisted_projects
 
 

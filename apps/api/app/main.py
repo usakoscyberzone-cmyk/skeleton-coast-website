@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 
 from . import models
-from .db import Base, engine
+from .db import Base, engine, upgrade_media_files_schema
 from .routes.health import router as health_router
 from .routes.projects import router as projects_router
 
@@ -14,6 +14,7 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def create_database_tables() -> None:
         Base.metadata.create_all(bind=engine)
+        upgrade_media_files_schema(engine)
 
     return app
 
