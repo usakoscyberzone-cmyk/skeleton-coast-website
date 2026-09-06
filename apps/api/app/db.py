@@ -60,6 +60,34 @@ def upgrade_media_files_schema(bind) -> None:
         connection.close()
 
 
+def upgrade_video_metrics_schema(bind) -> None:
+    """Add nullable analytics columns without rewriting a user's SQLite database."""
+    if bind.dialect.name != "sqlite":
+        return
+    additions = {
+        "analytics_start_date": "DATE", "analytics_end_date": "DATE", "title": "TEXT",
+        "published_at": "DATETIME", "duration_seconds": "INTEGER", "length_seconds": "INTEGER", "video_type": "VARCHAR(32)", "format": "VARCHAR(32)",
+        "topic": "VARCHAR(64)", "average_percentage_viewed": "FLOAT",
+        "subscriber_conversion_rate": "FLOAT", "returning_viewers": "INTEGER",
+        "retention_json": "TEXT", "views_1h": "INTEGER", "views_24h": "INTEGER", "views_7d": "INTEGER",
+    }
+    connection = bind.connect()
+    try:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        inspector = inspect(connection)
+        if "video_metric_snapshots" in inspector.get_table_names():
+            current = {column["name"] for column in inspector.get_columns("video_metric_snapshots")}
+            for name, ddl in additions.items():
+                if name not in current:
+                    connection.exec_driver_sql(f"ALTER TABLE video_metric_snapshots ADD COLUMN {name} {ddl}")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def begin_immediate_transaction(
     session: Session, *, max_attempts: int = 20, retry_delay_seconds: float = 0.05
 ) -> None:

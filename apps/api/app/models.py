@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -37,17 +37,33 @@ class VideoMetricSnapshot(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     youtube_video_id: Mapped[str] = mapped_column(String(32), index=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
-    views: Mapped[int] = mapped_column(Integer, default=0)
-    impressions: Mapped[int] = mapped_column(Integer, default=0)
-    ctr: Mapped[float] = mapped_column(Float, default=0.0)
-    watch_minutes: Mapped[float] = mapped_column(Float, default=0.0)
-    avg_view_duration_seconds: Mapped[float] = mapped_column(Float, default=0.0)
-    subscribers_gained: Mapped[int] = mapped_column(Integer, default=0)
-    browse_share: Mapped[float] = mapped_column(Float, default=0.0)
-    suggested_share: Mapped[float] = mapped_column(Float, default=0.0)
-    search_share: Mapped[float] = mapped_column(Float, default=0.0)
-    external_share: Mapped[float] = mapped_column(Float, default=0.0)
-    shorts_feed_share: Mapped[float] = mapped_column(Float, default=0.0)
+    analytics_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    analytics_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    length_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    video_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    format: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    topic: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    views: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    impressions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ctr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    watch_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_view_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    average_percentage_viewed: Mapped[float | None] = mapped_column(Float, nullable=True)
+    subscribers_gained: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    subscriber_conversion_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    browse_share: Mapped[float | None] = mapped_column(Float, nullable=True)
+    suggested_share: Mapped[float | None] = mapped_column(Float, nullable=True)
+    search_share: Mapped[float | None] = mapped_column(Float, nullable=True)
+    external_share: Mapped[float | None] = mapped_column(Float, nullable=True)
+    shorts_feed_share: Mapped[float | None] = mapped_column(Float, nullable=True)
+    returning_viewers: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    retention_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    views_1h: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    views_24h: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    views_7d: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class Recommendation(Base):

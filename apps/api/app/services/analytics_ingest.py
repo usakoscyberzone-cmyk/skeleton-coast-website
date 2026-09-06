@@ -1,0 +1,140 @@
+"""Metric normalization and persistence helpers for read-only YouTube data."""
+
+from dataclasses import dataclass
+from datetime import date
+import json
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ..models import VideoMetricSnapshot
+
+
+@dataclass(frozen=True)
+class MetricSnapshotInput:
+    youtube_video_id: str
+    views: int | None = None
+    impressions: int | None = None
+    ctr: float | None = None
+    watch_minutes: float | None = None
+    avg_view_duration_seconds: float | None = None
+    average_percentage_viewed: float | None = None
+    subscribers_gained: int | None = None
+    subscriber_conversion_rate: float | None = None
+    browse_share: float | None = None
+    suggested_share: float | None = None
+    search_share: float | None = None
+    external_share: float | None = None
+    shorts_feed_share: float | None = None
+    returning_viewers: int | None = None
+    retention: list[dict[str, float]] | None = None
+    views_1h: int | None = None
+    views_24h: int | None = None
+    views_7d: int | None = None
+    title: str | None = None
+    duration_seconds: int | None = None
+    length_seconds: int | None = None
+    video_type: str | None = None
+    format: str | None = None
+    topic: str | None = None
+
+
+def normalize_metrics(raw: dict[str, Any]) -> MetricSnapshotInput:
+    """Convert API units to one internal convention: ratios are 0..1, gaps are None."""
+    traffic = raw.get("traffic") or {}
+    views = _as_int(raw.get("views"))
+    subscribers_gained = _as_int(raw.get("subscribers_gained"))
+    retention = raw.get("retention")
+    return MetricSnapshotInput(
+        youtube_video_id=str(raw["video_id"]),
+        views=views,
+        impressions=_as_int(raw.get("impressions")),
+        ctr=_as_ratio(raw.get("ctr")),
+        watch_minutes=_as_float(raw.get("watch_minutes")),
+        avg_view_duration_seconds=_as_float(raw.get("avg_view_duration_seconds")),
+        average_percentage_viewed=_as_ratio(raw.get("average_percentage_viewed")),
+        subscribers_gained=subscribers_gained,
+        subscriber_conversion_rate=(
+            subscribers_gained / views
+            if subscribers_gained is not None and views is not None and views > 0
+            else None
+        ),
+        browse_share=_as_ratio(traffic.get("BROWSE")),
+        suggested_share=_as_ratio(traffic.get("SUGGESTED")),
+        search_share=_as_ratio(traffic.get("SEARCH")),
+        external_share=_as_ratio(traffic.get("EXTERNAL")),
+        shorts_feed_share=_as_ratio(traffic.get("SHORTS")),
+        returning_viewers=_as_int(raw.get("returning_viewers")),
+        retention=_normalize_retention(retention),
+        views_1h=_as_int(raw.get("views_1h")),
+        views_24h=_as_int(raw.get("views_24h")),
+        views_7d=_as_int(raw.get("views_7d")),
+        title=raw.get("title"),
+        duration_seconds=_as_int(raw.get("duration_seconds")),
+        length_seconds=_as_int(raw.get("length_seconds", raw.get("duration_seconds"))),
+        video_type=raw.get("video_type"),
+        format=raw.get("format", raw.get("video_type")),
+        topic=raw.get("topic"),
+    )
+
+
+def _as_int(value: Any) -> int | None:
+    return int(value) if value is not None else None
+
+
+def _as_float(value: Any) -> float | None:
+    return float(value) if value is not None else None
+
+
+def _as_ratio(value: Any) -> float | None:
+    if value is None:
+        return None
+    number = float(value)
+    if number < 0:
+        return None
+    return round(number / 100, 6) if number > 1 else number
+
+
+def _normalize_retention(points: Any) -> list[dict[str, float]] | None:
+    if points is None:
+        return None
+    return [
+        {
+            "elapsed_ratio": float(point["elapsed_ratio"]),
+            "audience_retention": _as_ratio(point.get("audience_retention")),
+        }
+        for point in points
+    ]
+
+
+def persist_metric_snapshot(
+    session: Session, metric: MetricSnapshotInput, *, start_date: date, end_date: date
+) -> VideoMetricSnapshot:
+    """Upsert a retry-safe snapshot for one video and reporting period."""
+    snapshot = session.scalar(
+        select(VideoMetricSnapshot).where(
+            VideoMetricSnapshot.youtube_video_id == metric.youtube_video_id,
+            VideoMetricSnapshot.analytics_start_date == start_date,
+            VideoMetricSnapshot.analytics_end_date == end_date,
+        )
+    )
+    values = {
+        name: getattr(metric, name)
+        for name in MetricSnapshotInput.__dataclass_fields__
+        if name != "youtube_video_id" and name != "retention"
+    }
+    values["retention_json"] = json.dumps(metric.retention) if metric.retention is not None else None
+    if snapshot is None:
+        snapshot = VideoMetricSnapshot(
+            youtube_video_id=metric.youtube_video_id,
+            analytics_start_date=start_date,
+            analytics_end_date=end_date,
+            **values,
+        )
+        session.add(snapshot)
+    else:
+        for name, value in values.items():
+            setattr(snapshot, name, value)
+    session.flush()
+    return snapshot
