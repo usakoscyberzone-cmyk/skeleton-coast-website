@@ -164,9 +164,30 @@ def analytics_summary(session: Session = Depends(get_session)) -> dict:
     def aggregate(name):
         known=[getattr(row,name) for row in latest if getattr(row,name) is not None]
         return {"value": sum(known) if known else None, "coverage": len(known)}
+    def leader(kind: str):
+        candidates = [
+            row for row in latest
+            if row.views is not None and (row.video_type or row.format or "").lower() == kind
+        ]
+        if not candidates:
+            return None
+        row = min(candidates, key=lambda candidate: (-candidate.views, candidate.youtube_video_id))
+        return {"id": row.youtube_video_id, "title": row.title or row.youtube_video_id, "views": row.views}
+    # Shares are already normalized per video. Weight each source only by videos
+    # that supplied both that source and views; missing source data is not zero.
+    traffic_sources = {}
+    for label, field in (("Browse", "browse_share"), ("Suggested", "suggested_share"), ("Search", "search_share"), ("External", "external_share"), ("Shorts Feed", "shorts_feed_share")):
+        contributing = [row for row in latest if row.views is not None and getattr(row, field) is not None]
+        if contributing:
+            denominator = sum(row.views for row in contributing)
+            if denominator:
+                traffic_sources[label] = sum(row.views * getattr(row, field) for row in contributing) / denominator
     return {
         "video_count": len(latest),
         "views": aggregate("views"), "watch_minutes": aggregate("watch_minutes"), "subscribers_gained": aggregate("subscribers_gained"),
+        "top_long_form": leader("long"),
+        "top_short": leader("short"),
+        "traffic_sources": traffic_sources,
     }
 
 

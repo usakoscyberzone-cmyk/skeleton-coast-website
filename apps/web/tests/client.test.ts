@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getActiveRecommendations, getProjects } from "../src/api/client";
+import { getActiveRecommendations, getDashboardSummary, getProject, getProjects, getYouTubeStatus } from "../src/api/client";
 
 describe("dashboard API client", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -15,5 +15,16 @@ describe("dashboard API client", () => {
   it("treats an unavailable future recommendations endpoint as no active actions", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail: "Not Found" }), { status: 404 })));
     await expect(getActiveRecommendations()).resolves.toEqual([]);
+  });
+
+  it.each([
+    ["projects", getProjects, { id: 3 }],
+    ["project detail", () => getProject(3), { id: 3, name: "Coast", path: "I:\\YouTube Projects\\Coast", media_files: [{}] }],
+    ["summary", getDashboardSummary, { video_count: 1, views: {}, watch_minutes: {}, subscribers_gained: {} }],
+    ["status", getYouTubeStatus, { channel_title: "Skeleton Coast" }],
+    ["recommendations", getActiveRecommendations, [{ id: 1, youtube_video_id: "v", state: "blue" }]],
+  ])("rejects malformed %s payloads before components render them", async (_label, client, payload) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(payload))));
+    await expect(client()).rejects.toThrow(/Invalid API response/i);
   });
 });

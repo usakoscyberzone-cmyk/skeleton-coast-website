@@ -8,18 +8,16 @@ export interface MediaFile {
 }
 export interface ProjectDetail extends ProjectSummary { media_files: MediaFile[]; }
 export interface MetricTotal { value: number | null; coverage: number; }
-export interface VideoSummary { title: string; views: number | null; }
-export interface VideoState { title: string; state: RecommendationState; }
+export interface VideoSummary { id: string; title: string; views: number; }
 export interface DashboardSummary {
   video_count: number;
   views: MetricTotal;
   watch_minutes: MetricTotal;
   subscribers_gained: MetricTotal;
   realtime_views?: number | null;
-  top_long_form?: VideoSummary | null;
-  top_short?: VideoSummary | null;
-  traffic_sources?: Record<string, number>;
-  video_states?: VideoState[];
+  top_long_form: VideoSummary | null;
+  top_short: VideoSummary | null;
+  traffic_sources: Record<string, number>;
 }
 export interface Recommendation {
   id: number; youtube_video_id: string; state: RecommendationState; action: string;
