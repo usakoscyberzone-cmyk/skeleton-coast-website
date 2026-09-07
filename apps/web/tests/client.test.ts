@@ -27,4 +27,18 @@ describe("dashboard API client", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(payload))));
     await expect(client()).rejects.toThrow(/Invalid API response/i);
   });
+
+  it("rejects a summary with a non-numeric realtime value", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      video_count: 1,
+      views: { value: 2, coverage: 1 },
+      watch_minutes: { value: 3, coverage: 1 },
+      subscribers_gained: { value: 1, coverage: 1 },
+      top_long_form: null,
+      top_short: null,
+      traffic_sources: {},
+      realtime_views: "soon",
+    }))));
+    await expect(getDashboardSummary()).rejects.toThrow(/Invalid API response/i);
+  });
 });
