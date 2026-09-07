@@ -61,3 +61,22 @@ def test_active_endpoint_returns_empty_list_when_no_recommendations_exist(tmp_pa
     assert client.get("/recommendations/active").status_code == 200
     assert client.get("/recommendations/active").json() == []
     session.close()
+
+
+def test_rebuild_with_normal_ingested_snapshots_missing_topic_stays_non_comparative_amber(tmp_path):
+    client, session = _client_with_session(tmp_path)
+    now = datetime.now(UTC).replace(tzinfo=None)
+    session.add_all([
+        _snapshot("target", now - timedelta(days=1), ctr=.90, average_percentage_viewed=.90),
+        _snapshot("target", now, ctr=.03, average_percentage_viewed=.30),
+        *[_snapshot(f"peer-{number}", now, ctr=.07, average_percentage_viewed=.50) for number in range(5)],
+    ])
+    for snapshot in session.scalars(select(VideoMetricSnapshot)):
+        snapshot.topic = None
+    session.commit()
+
+    assert client.post("/recommendations/rebuild").status_code == 200
+    target = next(row for row in client.get("/recommendations/active").json() if row["youtube_video_id"] == "target")
+    assert target["state"] == "amber"
+    assert target["confidence"] == "low"
+    assert target["data_used"]["comparable_sample_size"] == 0
