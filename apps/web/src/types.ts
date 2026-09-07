@@ -7,6 +7,13 @@ export interface MediaFile {
   codec: string | null; probe_error: string | null;
 }
 export interface ProjectDetail extends ProjectSummary { media_files: MediaFile[]; }
+export type ShortStatus = "planned" | "ready" | "published";
+export type ShortRole = "discovery" | "conversion" | "winner";
+export interface ShortPlan {
+  id: number; project_id: number; hook_type: string; source_start_seconds: number;
+  source_end_seconds: number; target_duration_seconds: number; on_screen_text: string;
+  cta: string; status: ShortStatus; strategic_role: ShortRole;
+}
 export interface MetricTotal { value: number | null; coverage: number; }
 export interface VideoSummary { id: string; title: string; views: number; }
 export interface RetentionVideo { id: string; title: string; }

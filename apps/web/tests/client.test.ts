@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getActiveRecommendations, getDashboardSummary, getProject, getProjects, getRetention, getYouTubeStatus } from "../src/api/client";
+import { getActiveRecommendations, getDashboardSummary, getProject, getProjects, getRetention, getShortPlans, getYouTubeStatus } from "../src/api/client";
 
 describe("dashboard API client", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -10,6 +10,12 @@ describe("dashboard API client", () => {
 
     await expect(getProjects()).resolves.toEqual([{ id: 3, name: "Coast", path: "I:\\YouTube Projects\\Coast" }]);
     expect(fetchMock).toHaveBeenCalledWith("/projects", expect.objectContaining({ headers: { Accept: "application/json" } }));
+  });
+
+  it("reads only runtime-valid short plans from the project funnel API", async () => {
+    const plan = { id: 8, project_id: 3, hook_type: "reveal", source_start_seconds: 2.5, source_end_seconds: 22.5, target_duration_seconds: 20, on_screen_text: "The coast changed", cta: "Watch the story", status: "planned", strategic_role: "discovery" };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify([plan]))));
+    await expect(getShortPlans(3)).resolves.toEqual([plan]);
   });
 
   it("treats an unavailable future recommendations endpoint as no active actions", async () => {

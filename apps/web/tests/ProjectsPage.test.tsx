@@ -68,4 +68,15 @@ describe("ProjectDetailPage", () => {
     renderDetail();
     expect(await screen.findByText(/No media files have been indexed/i)).toBeInTheDocument();
   });
+
+  it("keeps long-form context first and shows planned Shorts beneath it", async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/projects/1") return Promise.resolve(new Response(JSON.stringify({ id: 1, name: "Pilchard Mortality", path: "I:\\YouTube Projects\\Pilchard Mortality", media_files: [] })));
+      return Promise.resolve(new Response(JSON.stringify([{ id: 8, project_id: 1, hook_type: "reveal", source_start_seconds: 2.5, source_end_seconds: 22.5, target_duration_seconds: 20, on_screen_text: "The coast changed", cta: "Watch the story", status: "planned", strategic_role: "discovery" }])));
+    });
+    renderDetail();
+    expect(await screen.findByRole("heading", { name: /Shorts funnel/i })).toBeInTheDocument();
+    expect(screen.getByText(/2.5s.*22.5s/i)).toBeInTheDocument();
+    expect(screen.getByText(/No metrics have been recorded/i)).toBeInTheDocument();
+  });
 });

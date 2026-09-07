@@ -1,4 +1,4 @@
-import type { DashboardSummary, LearningPattern, MediaFile, ProjectDetail, ProjectSummary, Recommendation, RetentionData, YouTubeStatus } from "../types";
+import type { DashboardSummary, LearningPattern, MediaFile, ProjectDetail, ProjectSummary, Recommendation, RetentionData, ShortPlan, YouTubeStatus } from "../types";
 
 const baseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -19,6 +19,10 @@ function project(value: unknown, endpoint: string): ProjectSummary {
 function mediaFile(value: unknown, endpoint: string): MediaFile {
   if (!isRecord(value) || typeof value.id !== "number" || typeof value.path !== "string" || typeof value.kind !== "string" || !numberOrNull(value.duration_seconds) || !numberOrNull(value.width) || !numberOrNull(value.height) || !numberOrNull(value.frame_rate) || !stringOrNull(value.codec) || !stringOrNull(value.probe_error)) return invalid(endpoint);
   return { id: value.id as number, path: value.path as string, kind: value.kind as string, duration_seconds: value.duration_seconds as number | null, width: value.width as number | null, height: value.height as number | null, frame_rate: value.frame_rate as number | null, codec: value.codec as string | null, probe_error: value.probe_error as string | null };
+}
+function shortPlan(value: unknown, endpoint: string): ShortPlan {
+  if (!isRecord(value) || typeof value.id !== "number" || typeof value.project_id !== "number" || typeof value.hook_type !== "string" || typeof value.source_start_seconds !== "number" || typeof value.source_end_seconds !== "number" || typeof value.target_duration_seconds !== "number" || typeof value.on_screen_text !== "string" || typeof value.cta !== "string" || !["planned", "ready", "published"].includes(String(value.status)) || !["discovery", "conversion", "winner"].includes(String(value.strategic_role))) return invalid(endpoint);
+  return value as unknown as ShortPlan;
 }
 function dashboard(value: unknown): DashboardSummary {
   const metricFields = ["views", "watch_minutes", "subscribers_gained", "impressions", "ctr", "avg_view_duration_seconds", "average_percentage_viewed", "subscriber_conversion_rate", "returning_viewers", "views_1h", "views_24h", "views_7d"] as const;
@@ -46,6 +50,7 @@ async function getJson<T>(path: string, validate: (value: unknown) => T): Promis
 
 export function getProjects(): Promise<ProjectSummary[]> { return getJson("/projects", (value) => Array.isArray(value) ? value.map((item) => project(item, "/projects")) : invalid("/projects")); }
 export function getProject(id: string | number): Promise<ProjectDetail> { return getJson(`/projects/${id}`, (value) => { const base = project(value, `/projects/${id}`); if (!isRecord(value) || !Array.isArray(value.media_files)) return invalid(`/projects/${id}`); return { ...base, media_files: value.media_files.map((item) => mediaFile(item, `/projects/${id}`)) }; }); }
+export function getShortPlans(projectId: string | number): Promise<ShortPlan[]> { return getJson(`/projects/${projectId}/shorts`, (value) => Array.isArray(value) ? value.map((item) => shortPlan(item, `/projects/${projectId}/shorts`)) : invalid(`/projects/${projectId}/shorts`)); }
 export function getDashboardSummary(): Promise<DashboardSummary> { return getJson("/analytics/summary", dashboard); }
 export function getRetention(videoId: string): Promise<RetentionData> { return getJson(`/analytics/videos/${encodeURIComponent(videoId)}/retention`, (value) => isRecord(value) && typeof value.video_id === "string" && (value.retention === null || (Array.isArray(value.retention) && value.retention.every((point) => isRecord(point) && typeof point.elapsed_ratio === "number" && typeof point.audience_retention === "number"))) ? value as unknown as RetentionData : invalid("/analytics/videos/:id/retention")); }
 export async function getLearningPatterns(): Promise<LearningPattern[]> {

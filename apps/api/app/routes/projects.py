@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import begin_immediate_transaction, get_session
-from ..models import MediaFile, Project
-from ..schemas import MediaFileRead, ProjectDetailRead, ProjectRead
+from ..models import MediaFile, Project, ShortPlan
+from ..schemas import MediaFileRead, ProjectDetailRead, ProjectRead, ShortPlanCreate, ShortPlanRead
 from ..services.project_scanner import (
     ensure_project_structure,
     scan_master_folder,
@@ -75,6 +75,29 @@ def get_project(project_id: int, session: Session = Depends(get_session)) -> Pro
         path=project.path,
         media_files=[MediaFileRead.model_validate(media_file) for media_file in media_files],
     )
+
+
+def _project_or_404(session: Session, project_id: int) -> Project:
+    project = session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+@router.post("/{project_id}/shorts", response_model=ShortPlanRead, status_code=201)
+def create_short_plan(project_id: int, payload: ShortPlanCreate, session: Session = Depends(get_session)) -> ShortPlan:
+    _project_or_404(session, project_id)
+    plan = ShortPlan(project_id=project_id, **payload.model_dump())
+    session.add(plan)
+    session.commit()
+    session.refresh(plan)
+    return plan
+
+
+@router.get("/{project_id}/shorts", response_model=list[ShortPlanRead])
+def list_short_plans(project_id: int, session: Session = Depends(get_session)) -> list[ShortPlan]:
+    _project_or_404(session, project_id)
+    return list(session.scalars(select(ShortPlan).where(ShortPlan.project_id == project_id).order_by(ShortPlan.id)))
 
 
 def _persist_media_files(
