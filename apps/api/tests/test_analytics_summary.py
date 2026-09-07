@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.models import VideoMetricSnapshot
-from app.routes.youtube import analytics_summary
+from app.routes.youtube import analytics_summary, retention_data
 
 
 def test_summary_returns_latest_leaders_and_view_weighted_available_traffic_ratios(tmp_path):
@@ -116,3 +116,28 @@ def test_summary_lists_latest_retention_videos_even_without_views(tmp_path):
         {"id": "no-views", "title": "Retention only"},
         {"id": "same", "title": "Current"},
     ]
+
+
+def test_retention_reads_share_one_normalized_validator_and_hide_corrupt_legacy_rows(tmp_path):
+    """Only a non-empty array of numeric normalized points is selectable or readable."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'summary-retention-corrupt.db'}")
+    Base.metadata.create_all(engine)
+    malformed = {
+        "bad-json": "{",
+        "object": '{"elapsed_ratio": 0, "audience_retention": 1}',
+        "empty": "[]",
+        "wrong-key": '[{"elapsed_ratio": 0, "retention": 1}]',
+        "non-numeric": '[{"elapsed_ratio": "zero", "audience_retention": 1}]',
+        "sparse": '[{"elapsed_ratio": 0}]',
+    }
+    with Session(engine) as session:
+        session.add(VideoMetricSnapshot(youtube_video_id="valid", title="Valid", retention_json='[{"elapsed_ratio": 0, "audience_retention": 1}]'))
+        session.add_all(VideoMetricSnapshot(youtube_video_id=video_id, retention_json=payload) for video_id, payload in malformed.items())
+        session.commit()
+        summary = analytics_summary(session)
+        values = {video_id: retention_data(video_id, session)["retention"] for video_id in malformed}
+        valid = retention_data("valid", session)["retention"]
+
+    assert summary["retention_videos"] == [{"id": "valid", "title": "Valid"}]
+    assert values == {video_id: None for video_id in malformed}
+    assert valid == [{"elapsed_ratio": 0, "audience_retention": 1}]

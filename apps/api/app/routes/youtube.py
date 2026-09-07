@@ -33,6 +33,26 @@ YOUTUBE_ROUTE_ERRORS = (
 )
 
 
+def normalized_retention_points(payload: str | None) -> list[dict[str, float]] | None:
+    """Read legacy retention safely; only persisted normalized point arrays are usable."""
+    if not payload:
+        return None
+    try:
+        parsed = json.loads(payload)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, list) or not parsed:
+        return None
+    if not all(
+        isinstance(point, dict)
+        and isinstance(point.get("elapsed_ratio"), (int, float)) and not isinstance(point.get("elapsed_ratio"), bool)
+        and isinstance(point.get("audience_retention"), (int, float)) and not isinstance(point.get("audience_retention"), bool)
+        for point in parsed
+    ):
+        return None
+    return parsed
+
+
 def _youtube_http_error(error: Exception) -> HTTPException:
     if isinstance(error, (YouTubeOAuthStateError, YouTubeOAuthCallbackError)):
         return HTTPException(status_code=400, detail="OAuth callback could not be validated.")
@@ -208,15 +228,10 @@ def analytics_summary(session: Session = Depends(get_session)) -> dict:
         for row in sorted(latest, key=lambda item: ((item.views is None), -(item.views or 0), item.youtube_video_id))
         if row.views is not None
     ]
-    def has_retention_points(row):
-        try:
-            return isinstance(json.loads(row.retention_json), list) and bool(json.loads(row.retention_json)) if row.retention_json else False
-        except json.JSONDecodeError:
-            return False
     retention_videos = [
         {"id": row.youtube_video_id, "title": row.title or row.youtube_video_id}
         for row in sorted(latest, key=lambda item: item.youtube_video_id)
-        if has_retention_points(row)
+        if normalized_retention_points(row.retention_json) is not None
     ]
     return {
         "video_count": len(latest),
@@ -243,4 +258,4 @@ def retention_data(video_id: str, session: Session = Depends(get_session)) -> di
     )
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Video metrics not found")
-    return {"video_id": video_id, "retention": json.loads(snapshot.retention_json) if snapshot.retention_json else None}
+    return {"video_id": video_id, "retention": normalized_retention_points(snapshot.retention_json)}
