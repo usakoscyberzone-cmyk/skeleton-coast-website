@@ -26,7 +26,9 @@ RECOGNIZED_TOPICS = {"fishing", "namibia travel", "angola", "history", "4x4", "c
 
 
 def length_bucket(length_seconds: int | None) -> str:
-    if length_seconds is None or length_seconds < 60:
+    if length_seconds is None:
+        return "unknown"
+    if length_seconds < 60:
         return "<1m"
     if length_seconds <= 300:
         return "1-5m"
