@@ -167,8 +167,16 @@ def upgrade_short_plans_schema(bind) -> None:
         if "strategic_role" in columns and columns["strategic_role"]["nullable"] is False:
             connection.commit()
             return
+        retained_indexes = list(connection.exec_driver_sql(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' "
+            "AND tbl_name = 'short_plans' AND sql IS NOT NULL"
+        ))
         connection.exec_driver_sql("ALTER TABLE short_plans RENAME TO short_plans_legacy")
         from .models import ShortPlan
+        schema_index_names = {index.name for index in ShortPlan.__table__.indexes}
+        for name, _sql in retained_indexes:
+            if name in schema_index_names:
+                connection.exec_driver_sql(f'DROP INDEX "{name.replace(chr(34), chr(34) * 2)}"')
         ShortPlan.__table__.create(connection)
         legacy_columns = {column["name"] for column in inspect(connection).get_columns("short_plans_legacy")}
         target_columns = [column.name for column in ShortPlan.__table__.columns]
@@ -182,6 +190,10 @@ def upgrade_short_plans_schema(bind) -> None:
             f"SELECT {', '.join(select_values)} FROM short_plans_legacy"
         )
         connection.exec_driver_sql("DROP TABLE short_plans_legacy")
+        existing_indexes = {row[1] for row in connection.exec_driver_sql("PRAGMA index_list(short_plans)")}
+        for name, sql in retained_indexes:
+            if name not in existing_indexes and name not in schema_index_names:
+                connection.exec_driver_sql(sql)
         connection.commit()
     except Exception:
         connection.rollback()

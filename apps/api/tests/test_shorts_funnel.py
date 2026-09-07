@@ -105,6 +105,8 @@ def test_legacy_null_roles_are_backfilled_idempotently_and_roundtrip_through_get
         connection.execute(text("CREATE TABLE short_plans (id INTEGER PRIMARY KEY, project_id INTEGER, hook_type TEXT, source_start_seconds FLOAT, source_end_seconds FLOAT, target_duration_seconds FLOAT, on_screen_text TEXT, cta TEXT, status TEXT, strategic_role TEXT)"))
         connection.execute(text("INSERT INTO projects VALUES (1, 'Legacy', 'I:/YouTube Projects/Legacy', CURRENT_TIMESTAMP)"))
         connection.execute(text("INSERT INTO short_plans VALUES (7, 1, 'reveal', 1.25, 11.25, 10, 'Text', 'CTA', 'planned', NULL)"))
+        connection.execute(text("CREATE INDEX ix_short_plans_project_id ON short_plans(project_id)"))
+        connection.execute(text("CREATE INDEX legacy_short_hook_lookup ON short_plans(hook_type)"))
 
     monkeypatch.setattr(main_module, "engine", engine)
     app = create_app()
@@ -112,6 +114,9 @@ def test_legacy_null_roles_are_backfilled_idempotently_and_roundtrip_through_get
         pass
     upgrade_short_plans_schema(engine)
     assert inspect(engine).get_columns("short_plans")[-1]["nullable"] is False
+    index_names = {index["name"] for index in inspect(engine).get_indexes("short_plans")}
+    assert "ix_short_plans_project_id" in index_names
+    assert "legacy_short_hook_lookup" in index_names
     with Session(engine) as session:
         app.dependency_overrides[get_session] = lambda: session
         response = TestClient(app).get("/projects/1/shorts")
