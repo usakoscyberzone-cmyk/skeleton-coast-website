@@ -119,6 +119,29 @@ def upgrade_video_metrics_schema(bind) -> None:
         connection.close()
 
 
+def upgrade_recommendations_schema(bind) -> None:
+    if bind.dialect.name != "sqlite":
+        return
+    connection = bind.connect()
+    try:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        inspector = inspect(connection)
+        if "recommendations" in inspector.get_table_names():
+            columns = {column["name"] for column in inspector.get_columns("recommendations")}
+            if "is_active" not in columns:
+                connection.exec_driver_sql("ALTER TABLE recommendations ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1")
+            connection.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_recommendation_per_video "
+                "ON recommendations (youtube_video_id) WHERE is_active = 1"
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def begin_immediate_transaction(
     session: Session, *, max_attempts: int = 20, retry_delay_seconds: float = 0.05
 ) -> None:

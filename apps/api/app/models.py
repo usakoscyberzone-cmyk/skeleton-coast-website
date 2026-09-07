@@ -1,6 +1,6 @@
 from datetime import UTC, date, datetime
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -101,7 +101,14 @@ class Recommendation(Base):
     reason: Mapped[str] = mapped_column(Text)
     confidence: Mapped[str] = mapped_column(String(16))
     data_used_json: Mapped[str] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+Index(
+    "uq_active_recommendation_per_video", Recommendation.youtube_video_id,
+    unique=True, sqlite_where=text("is_active = 1"),
+)
 
 
 class ShortPlan(Base):
