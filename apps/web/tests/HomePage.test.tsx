@@ -29,7 +29,7 @@ describe("HomePage", () => {
     expect(screen.getByText("84")).toBeInTheDocument();
     expect(screen.getByText("318")).toBeInTheDocument();
     expect(screen.getAllByText("Desert Kob").length).toBeGreaterThan(0);
-    expect(screen.getByText("Shark release")).toBeInTheDocument();
+    expect(screen.getAllByText("Shark release").length).toBeGreaterThan(0);
     expect(screen.getByText(/Browse 46%/)).toBeInTheDocument();
     expect(screen.getByText("Green")).toBeInTheDocument();
     expect(screen.getByText("Amber")).toBeInTheDocument();
