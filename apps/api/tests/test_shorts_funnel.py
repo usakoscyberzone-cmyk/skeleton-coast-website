@@ -2,10 +2,11 @@ import math
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session
 
-from app.db import Base, get_session
+from app.db import Base, get_session, upgrade_short_plans_schema
+import app.main as main_module
 from app.main import create_app
 from app.models import Project
 from app.schemas import ShortPlanCreate
@@ -84,11 +85,35 @@ def test_short_plan_routes_return_not_found_for_unknown_project(tmp_path):
     session.close()
 
 
-@pytest.mark.parametrize("timestamp", [math.inf, math.nan])
-def test_short_plan_schema_rejects_non_finite_timestamps(timestamp):
+@pytest.mark.parametrize("field", ["source_start_seconds", "source_end_seconds", "target_duration_seconds"])
+@pytest.mark.parametrize("timestamp", [math.inf, -math.inf, math.nan])
+def test_short_plan_schema_rejects_non_finite_timestamps(field, timestamp):
+    payload = dict(
+        hook_type="hook", source_start_seconds=0, source_end_seconds=2,
+        target_duration_seconds=1, on_screen_text="text", cta="cta",
+        status="planned", strategic_role="discovery",
+    )
+    payload[field] = timestamp
     with pytest.raises(ValueError):
-        ShortPlanCreate(
-            hook_type="hook", source_start_seconds=timestamp, source_end_seconds=2,
-            target_duration_seconds=1, on_screen_text="text", cta="cta",
-            status="planned", strategic_role="discovery",
-        )
+        ShortPlanCreate(**payload)
+
+
+def test_legacy_null_roles_are_backfilled_idempotently_and_roundtrip_through_get(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-shorts.db'}")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT, path TEXT, created_at DATETIME)"))
+        connection.execute(text("CREATE TABLE short_plans (id INTEGER PRIMARY KEY, project_id INTEGER, hook_type TEXT, source_start_seconds FLOAT, source_end_seconds FLOAT, target_duration_seconds FLOAT, on_screen_text TEXT, cta TEXT, status TEXT, strategic_role TEXT)"))
+        connection.execute(text("INSERT INTO projects VALUES (1, 'Legacy', 'I:/YouTube Projects/Legacy', CURRENT_TIMESTAMP)"))
+        connection.execute(text("INSERT INTO short_plans VALUES (7, 1, 'reveal', 1.25, 11.25, 10, 'Text', 'CTA', 'planned', NULL)"))
+
+    monkeypatch.setattr(main_module, "engine", engine)
+    app = create_app()
+    with TestClient(app):
+        pass
+    upgrade_short_plans_schema(engine)
+    assert inspect(engine).get_columns("short_plans")[-1]["nullable"] is False
+    with Session(engine) as session:
+        app.dependency_overrides[get_session] = lambda: session
+        response = TestClient(app).get("/projects/1/shorts")
+    assert response.status_code == 200
+    assert response.json() == [{"id": 7, "project_id": 1, "hook_type": "reveal", "source_start_seconds": 1.25, "source_end_seconds": 11.25, "target_duration_seconds": 10, "on_screen_text": "Text", "cta": "CTA", "status": "planned", "strategic_role": "discovery"}]

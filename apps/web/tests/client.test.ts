@@ -14,8 +14,19 @@ describe("dashboard API client", () => {
 
   it("reads only runtime-valid short plans from the project funnel API", async () => {
     const plan = { id: 8, project_id: 3, hook_type: "reveal", source_start_seconds: 2.5, source_end_seconds: 22.5, target_duration_seconds: 20, on_screen_text: "The coast changed", cta: "Watch the story", status: "planned", strategic_role: "discovery" };
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify([plan]))));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => [plan] }));
     await expect(getShortPlans(3)).resolves.toEqual([plan]);
+  });
+
+  it.each([
+    { source_start_seconds: Number.NaN },
+    { source_end_seconds: Infinity },
+    { source_end_seconds: 2.5, source_start_seconds: 2.5 },
+    { target_duration_seconds: 21 },
+  ])("rejects non-finite or impossible short-plan ranges", async (override) => {
+    const plan = { id: 8, project_id: 3, hook_type: "reveal", source_start_seconds: 2.5, source_end_seconds: 22.5, target_duration_seconds: 20, on_screen_text: "The coast changed", cta: "Watch the story", status: "planned", strategic_role: "discovery", ...override };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify([plan]))));
+    await expect(getShortPlans(3)).rejects.toThrow(/Invalid API response/i);
   });
 
   it("treats an unavailable future recommendations endpoint as no active actions", async () => {

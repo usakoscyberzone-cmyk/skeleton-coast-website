@@ -21,9 +21,10 @@ function mediaFile(value: unknown, endpoint: string): MediaFile {
   return { id: value.id as number, path: value.path as string, kind: value.kind as string, duration_seconds: value.duration_seconds as number | null, width: value.width as number | null, height: value.height as number | null, frame_rate: value.frame_rate as number | null, codec: value.codec as string | null, probe_error: value.probe_error as string | null };
 }
 function shortPlan(value: unknown, endpoint: string): ShortPlan {
-  if (!isRecord(value) || typeof value.id !== "number" || typeof value.project_id !== "number" || typeof value.hook_type !== "string" || typeof value.source_start_seconds !== "number" || typeof value.source_end_seconds !== "number" || typeof value.target_duration_seconds !== "number" || typeof value.on_screen_text !== "string" || typeof value.cta !== "string" || !["planned", "ready", "published"].includes(String(value.status)) || !["discovery", "conversion", "winner"].includes(String(value.strategic_role))) return invalid(endpoint);
+  if (!isRecord(value) || typeof value.id !== "number" || typeof value.project_id !== "number" || typeof value.hook_type !== "string" || !validShortRange(value.source_start_seconds, value.source_end_seconds, value.target_duration_seconds) || typeof value.on_screen_text !== "string" || typeof value.cta !== "string" || !["planned", "ready", "published"].includes(String(value.status)) || !["discovery", "conversion", "winner"].includes(String(value.strategic_role))) return invalid(endpoint);
   return value as unknown as ShortPlan;
 }
+function validShortRange(start: unknown, end: unknown, target: unknown) { return typeof start === "number" && typeof end === "number" && typeof target === "number" && Number.isFinite(start) && Number.isFinite(end) && Number.isFinite(target) && start >= 0 && end > start && target > 0 && target <= end - start; }
 function dashboard(value: unknown): DashboardSummary {
   const metricFields = ["views", "watch_minutes", "subscribers_gained", "impressions", "ctr", "avg_view_duration_seconds", "average_percentage_viewed", "subscriber_conversion_rate", "returning_viewers", "views_1h", "views_24h", "views_7d"] as const;
   const required = ["views", "watch_minutes", "subscribers_gained"] as const;

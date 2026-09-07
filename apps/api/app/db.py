@@ -152,6 +152,44 @@ def upgrade_recommendations_schema(bind) -> None:
         connection.close()
 
 
+def upgrade_short_plans_schema(bind) -> None:
+    """Backfill legacy nullable roles before the advisory plans are read."""
+    if bind.dialect.name != "sqlite":
+        return
+    connection = bind.connect()
+    try:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        inspector = inspect(connection)
+        if "short_plans" not in inspector.get_table_names():
+            connection.commit()
+            return
+        columns = {column["name"]: column for column in inspector.get_columns("short_plans")}
+        if "strategic_role" in columns and columns["strategic_role"]["nullable"] is False:
+            connection.commit()
+            return
+        connection.exec_driver_sql("ALTER TABLE short_plans RENAME TO short_plans_legacy")
+        from .models import ShortPlan
+        ShortPlan.__table__.create(connection)
+        legacy_columns = {column["name"] for column in inspect(connection).get_columns("short_plans_legacy")}
+        target_columns = [column.name for column in ShortPlan.__table__.columns]
+        copied_columns = [name for name in target_columns if name in legacy_columns]
+        select_values = [
+            "COALESCE(strategic_role, 'discovery')" if name == "strategic_role" and name in legacy_columns else "'discovery'" if name == "strategic_role" else name
+            for name in target_columns
+        ]
+        connection.exec_driver_sql(
+            f"INSERT INTO short_plans ({', '.join(target_columns)}) "
+            f"SELECT {', '.join(select_values)} FROM short_plans_legacy"
+        )
+        connection.exec_driver_sql("DROP TABLE short_plans_legacy")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def begin_immediate_transaction(
     session: Session, *, max_attempts: int = 20, retry_delay_seconds: float = 0.05
 ) -> None:

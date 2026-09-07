@@ -42,9 +42,9 @@ ShortRole = Literal["discovery", "conversion", "winner"]
 
 class ShortPlanCreate(BaseModel):
     hook_type: str = Field(min_length=1, max_length=64)
-    source_start_seconds: float = Field(ge=0)
-    source_end_seconds: float = Field(gt=0)
-    target_duration_seconds: float = Field(gt=0)
+    source_start_seconds: float = Field(ge=0, allow_inf_nan=False)
+    source_end_seconds: float = Field(gt=0, allow_inf_nan=False)
+    target_duration_seconds: float = Field(gt=0, allow_inf_nan=False)
     on_screen_text: str = Field(min_length=1)
     cta: str = Field(min_length=1)
     status: ShortStatus = "planned"

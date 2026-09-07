@@ -123,7 +123,7 @@ class ShortPlan(Base):
     on_screen_text: Mapped[str] = mapped_column(Text)
     cta: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="planned")
-    strategic_role: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    strategic_role: Mapped[str] = mapped_column(String(32), nullable=False, default="discovery")
 
 
 class LearningPattern(Base):

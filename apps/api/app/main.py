@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 
 from . import models
-from .db import Base, engine, upgrade_media_files_schema, upgrade_recommendations_schema, upgrade_video_metrics_schema
+from .db import Base, engine, upgrade_media_files_schema, upgrade_recommendations_schema, upgrade_short_plans_schema, upgrade_video_metrics_schema
 from .routes.health import router as health_router
 from .routes.projects import router as projects_router
 from .routes.youtube import analytics_router, router as youtube_router
@@ -22,6 +22,7 @@ def create_app() -> FastAPI:
         upgrade_media_files_schema(engine)
         upgrade_video_metrics_schema(engine)
         upgrade_recommendations_schema(engine)
+        upgrade_short_plans_schema(engine)
 
     return app
 
