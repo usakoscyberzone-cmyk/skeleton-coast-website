@@ -141,3 +141,23 @@ def test_retention_reads_share_one_normalized_validator_and_hide_corrupt_legacy_
     assert summary["retention_videos"] == [{"id": "valid", "title": "Valid"}]
     assert values == {video_id: None for video_id in malformed}
     assert valid == [{"elapsed_ratio": 0, "audience_retention": 1}]
+
+
+def test_retention_read_validator_rejects_non_finite_numeric_points(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'summary-retention-nonfinite.db'}")
+    Base.metadata.create_all(engine)
+    invalid = {
+        "elapsed-nan": '[{"elapsed_ratio": NaN, "audience_retention": 1}]',
+        "audience-nan": '[{"elapsed_ratio": 0, "audience_retention": NaN}]',
+        "elapsed-infinity": '[{"elapsed_ratio": Infinity, "audience_retention": 1}]',
+        "audience-negative-infinity": '[{"elapsed_ratio": 0, "audience_retention": -Infinity}]',
+    }
+    with Session(engine) as session:
+        session.add(VideoMetricSnapshot(youtube_video_id="finite", retention_json='[{"elapsed_ratio": 0.5, "audience_retention": 0.75}]'))
+        session.add_all(VideoMetricSnapshot(youtube_video_id=video_id, retention_json=payload) for video_id, payload in invalid.items())
+        session.commit()
+        summary = analytics_summary(session)
+        values = {video_id: retention_data(video_id, session)["retention"] for video_id in invalid}
+
+    assert summary["retention_videos"] == [{"id": "finite", "title": "finite"}]
+    assert values == {video_id: None for video_id in invalid}

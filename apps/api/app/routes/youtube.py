@@ -2,6 +2,7 @@
 
 from datetime import date, timedelta
 import json
+import math
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pathlib import Path
@@ -45,8 +46,8 @@ def normalized_retention_points(payload: str | None) -> list[dict[str, float]] |
         return None
     if not all(
         isinstance(point, dict)
-        and isinstance(point.get("elapsed_ratio"), (int, float)) and not isinstance(point.get("elapsed_ratio"), bool)
-        and isinstance(point.get("audience_retention"), (int, float)) and not isinstance(point.get("audience_retention"), bool)
+        and isinstance(point.get("elapsed_ratio"), (int, float)) and not isinstance(point.get("elapsed_ratio"), bool) and math.isfinite(point["elapsed_ratio"])
+        and isinstance(point.get("audience_retention"), (int, float)) and not isinstance(point.get("audience_retention"), bool) and math.isfinite(point["audience_retention"])
         for point in parsed
     ):
         return None
