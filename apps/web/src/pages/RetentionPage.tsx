@@ -10,23 +10,22 @@ export function RetentionPage() {
   useEffect(() => { if (!selected) { setRetention(null); return; } getRetention(selected).then(setRetention).catch((reason: Error) => setError(reason.message)); }, [selected]);
   if (error) return <main><h1>Retention</h1><p role="alert">Unable to load retention: {error}</p></main>;
   if (!summary) return <main><h1>Retention</h1><p>Loading videos…</p></main>;
-  return <main><h1>Retention</h1><label>Video <select aria-label="Video" value={selected} onChange={(event) => setSelected(event.target.value)}><option value="">Select a measured video</option>{summary.videos.map((video) => <option value={video.id} key={video.id}>{video.title}</option>)}</select></label>
-    {!summary.videos.length && <p>No videos with persisted metrics are available.</p>}
+  return <main><h1>Retention</h1><label>Video <select aria-label="Video" value={selected} onChange={(event) => setSelected(event.target.value)}><option value="">Select a measured video</option>{summary.retention_videos.map((video) => <option value={video.id} key={video.id}>{video.title}</option>)}</select></label>
+    {!summary.retention_videos.length && <p>No videos with measured retention are available.</p>}
     {selected && !retention && <p>Loading retention evidence…</p>}
-    {retention && !retention.retention && <p>Measured retention is unavailable for this video.</p>}
-    {retention?.retention && <MeasuredRetention value={retention.retention} />}
+    {retention && (!retention.retention || !retention.retention.length) && <p>Measured retention is unavailable for this video.</p>}
+    {retention?.retention && retention.retention.length > 0 && <MeasuredRetention points={retention.retention} />}
   </main>;
 }
-function MeasuredRetention({ value }: { value: Record<string, unknown> }) {
-  const replay = Array.isArray(value.replay_sections) && value.replay_sections.length > 0;
-  const slow = Array.isArray(value.slow_sections) && value.slow_sections.length > 0;
-  const candidates = Array.isArray(value.short_candidates) && value.short_candidates.length > 0;
+function MeasuredRetention({ points }: { points: NonNullable<RetentionData["retention"]> }) {
+  const ordered = [...points].sort((left, right) => left.elapsed_ratio - right.elapsed_ratio);
+  const opening = ordered[0]; const ending = ordered[ordered.length - 1];
   return <section><h2>Measured retention</h2>
-    <p>Opening retention: {typeof value.opening_retention === "number" ? `${(value.opening_retention * 100).toFixed(0)}%` : "Unavailable"}</p>
-    <p>First significant drop: {seconds(value.first_significant_drop_seconds)}</p>
-    <p>Replay or high-interest: {replay ? "Measured sections available" : "Insufficient measured data"}</p>
-    <p>Slow sections: {slow ? "Measured sections available" : "Insufficient measured data"}</p>
-    <p>Ending: {value.strong_ending === true ? "Measured strong ending" : value.strong_ending === false ? "Measured ending data does not support a strong-ending marker" : "Insufficient measured data"}</p>
-    <p>Possible Short candidates: {candidates ? "Measured sections available" : "Insufficient measured data"}</p>
+    <p>Opening retention (measured): {(opening.audience_retention * 100).toFixed(0)}%</p>
+    <p>First significant drop: Insufficient measured data (no documented threshold).</p>
+    <p>Replay or high-interest: Insufficient measured data (no documented threshold).</p>
+    <p>Slow sections: Insufficient measured data (no documented threshold).</p>
+    <p>Ending (measured): {(ending.audience_retention * 100).toFixed(0)}%</p>
+    <p>Possible Short candidates: Insufficient measured data (no documented threshold).</p>
   </section>;
 }

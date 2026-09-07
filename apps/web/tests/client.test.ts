@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getActiveRecommendations, getDashboardSummary, getProject, getProjects, getYouTubeStatus } from "../src/api/client";
+import { getActiveRecommendations, getDashboardSummary, getProject, getProjects, getRetention, getYouTubeStatus } from "../src/api/client";
 
 describe("dashboard API client", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -40,5 +40,22 @@ describe("dashboard API client", () => {
       realtime_views: "soon",
     }))));
     await expect(getDashboardSummary()).rejects.toThrow(/Invalid API response/i);
+  });
+
+  it.each([
+    [{ video_id: "v", retention: [{ elapsed_ratio: 0, audience_retention: 1 }] }],
+    [{ video_id: "v", retention: [] }],
+  ])("accepts persisted retention point arrays", async (payload) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(payload))));
+    await expect(getRetention("v")).resolves.toEqual(payload);
+  });
+
+  it.each([
+    { video_id: "v", retention: { elapsed_ratio: 0, audience_retention: 1 } },
+    { video_id: "v", retention: [{ elapsed_ratio: "start", audience_retention: 1 }] },
+    { video_id: "v", retention: [{ elapsed_ratio: 0 }] },
+  ])("rejects malformed retention point arrays", async (payload) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(payload))));
+    await expect(getRetention("v")).rejects.toThrow(/Invalid API response/i);
   });
 });

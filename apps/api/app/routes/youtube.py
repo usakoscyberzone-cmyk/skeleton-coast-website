@@ -164,6 +164,21 @@ def analytics_summary(session: Session = Depends(get_session)) -> dict:
     def aggregate(name):
         known=[getattr(row,name) for row in latest if getattr(row,name) is not None]
         return {"value": sum(known) if known else None, "coverage": len(known)}
+    def weighted(metric_name, denominator_name):
+        pairs = [
+            (getattr(row, metric_name), getattr(row, denominator_name)) for row in latest
+            if getattr(row, metric_name) is not None and getattr(row, denominator_name) is not None
+            and getattr(row, denominator_name) > 0
+        ]
+        denominator = sum(pair[1] for pair in pairs)
+        return {"value": sum(value * weight for value, weight in pairs) / denominator if denominator else None, "coverage": len(pairs)}
+    def conversion_rate():
+        pairs = [
+            (row.subscribers_gained, row.views) for row in latest
+            if row.subscribers_gained is not None and row.views is not None and row.views > 0
+        ]
+        denominator = sum(pair[1] for pair in pairs)
+        return {"value": sum(pair[0] for pair in pairs) / denominator if denominator else None, "coverage": len(pairs)}
     def leader(kind: str):
         candidates = [
             row for row in latest
@@ -193,19 +208,29 @@ def analytics_summary(session: Session = Depends(get_session)) -> dict:
         for row in sorted(latest, key=lambda item: ((item.views is None), -(item.views or 0), item.youtube_video_id))
         if row.views is not None
     ]
+    def has_retention_points(row):
+        try:
+            return isinstance(json.loads(row.retention_json), list) and bool(json.loads(row.retention_json)) if row.retention_json else False
+        except json.JSONDecodeError:
+            return False
+    retention_videos = [
+        {"id": row.youtube_video_id, "title": row.title or row.youtube_video_id}
+        for row in sorted(latest, key=lambda item: item.youtube_video_id)
+        if has_retention_points(row)
+    ]
     return {
         "video_count": len(latest),
         "views": aggregate("views"), "watch_minutes": aggregate("watch_minutes"), "subscribers_gained": aggregate("subscribers_gained"),
-        "impressions": aggregate("impressions"), "ctr": aggregate("ctr"),
-        "avg_view_duration_seconds": aggregate("avg_view_duration_seconds"),
-        "average_percentage_viewed": aggregate("average_percentage_viewed"),
-        "subscriber_conversion_rate": aggregate("subscriber_conversion_rate"),
+        "impressions": aggregate("impressions"), "ctr": weighted("ctr", "impressions"),
+        "avg_view_duration_seconds": weighted("avg_view_duration_seconds", "views"),
+        "average_percentage_viewed": weighted("average_percentage_viewed", "views"),
+        "subscriber_conversion_rate": conversion_rate(),
         "returning_viewers": aggregate("returning_viewers"),
         "views_1h": aggregate("views_1h"), "views_24h": aggregate("views_24h"), "views_7d": aggregate("views_7d"),
         "top_long_form": leader("long"),
         "top_short": leader("short"),
         "traffic_sources": traffic_sources, "traffic_source_coverage": traffic_source_coverage,
-        "videos": videos, "topics": topics,
+        "videos": videos, "retention_videos": retention_videos, "topics": topics,
     }
 
 

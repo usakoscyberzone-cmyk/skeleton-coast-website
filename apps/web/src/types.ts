@@ -9,6 +9,8 @@ export interface MediaFile {
 export interface ProjectDetail extends ProjectSummary { media_files: MediaFile[]; }
 export interface MetricTotal { value: number | null; coverage: number; }
 export interface VideoSummary { id: string; title: string; views: number; }
+export interface RetentionVideo { id: string; title: string; }
+export interface RetentionPoint { elapsed_ratio: number; audience_retention: number; }
 export interface DashboardSummary {
   video_count: number;
   views: MetricTotal;
@@ -21,12 +23,12 @@ export interface DashboardSummary {
   impressions: MetricTotal; ctr: MetricTotal; avg_view_duration_seconds: MetricTotal;
   average_percentage_viewed: MetricTotal; subscriber_conversion_rate: MetricTotal;
   returning_viewers: MetricTotal; views_1h: MetricTotal; views_24h: MetricTotal; views_7d: MetricTotal;
-  traffic_source_coverage: Record<string, number>; videos: VideoSummary[]; topics: Record<string, MetricTotal>;
+  traffic_source_coverage: Record<string, number>; videos: VideoSummary[]; retention_videos: RetentionVideo[]; topics: Record<string, MetricTotal>;
 }
 export interface Recommendation {
   id: number; youtube_video_id: string; state: RecommendationState; action: string;
   reason: string; confidence: "low" | "medium" | "high"; data_used: Record<string, unknown>;
 }
 export interface YouTubeStatus { status: string; detail?: string; channel_title?: string; channel_id?: string; }
-export interface RetentionData { video_id: string; retention: Record<string, unknown> | null; }
+export interface RetentionData { video_id: string; retention: RetentionPoint[] | null; }
 export interface LearningPattern { id: number; topic: string; pattern_type: string; summary: string; confidence: string; evidence_count: number; }

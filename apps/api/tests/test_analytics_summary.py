@@ -66,3 +66,53 @@ def test_summary_exposes_persisted_metrics_video_choices_and_all_required_topics
     assert summary["videos"] == [{"id": "fishing-video", "title": "Fishing evidence", "views": 10}]
     assert summary["topics"]["Fishing"] == {"value": 10, "coverage": 1}
     assert summary["topics"]["Namibia travel"] == {"value": None, "coverage": 0}
+
+
+def test_summary_weights_ratio_metrics_and_excludes_missing_or_zero_denominators(tmp_path):
+    """Summing percentages or durations is false; each must use its persisted denominator."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'summary-weighted.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all([
+            VideoMetricSnapshot(youtube_video_id="small", views=100, impressions=100, ctr=.10,
+                                avg_view_duration_seconds=60, average_percentage_viewed=.30,
+                                subscribers_gained=10),
+            VideoMetricSnapshot(youtube_video_id="large", views=900, impressions=900, ctr=.20,
+                                avg_view_duration_seconds=120, average_percentage_viewed=.60,
+                                subscribers_gained=90),
+            VideoMetricSnapshot(youtube_video_id="missing", views=None, impressions=None, ctr=.90,
+                                avg_view_duration_seconds=999, average_percentage_viewed=.99,
+                                subscribers_gained=999),
+            VideoMetricSnapshot(youtube_video_id="zero", views=0, impressions=0, ctr=.80,
+                                avg_view_duration_seconds=333, average_percentage_viewed=.80,
+                                subscribers_gained=50),
+        ])
+        session.commit()
+        summary = analytics_summary(session)
+
+    assert summary["ctr"] == {"value": .19, "coverage": 2}
+    assert summary["avg_view_duration_seconds"] == {"value": 114, "coverage": 2}
+    assert summary["average_percentage_viewed"] == {"value": .57, "coverage": 2}
+    assert summary["subscriber_conversion_rate"] == {"value": .1, "coverage": 2}
+    assert summary["views"] == {"value": 1000, "coverage": 3}
+    assert summary["impressions"] == {"value": 1000, "coverage": 3}
+
+
+def test_summary_lists_latest_retention_videos_even_without_views(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'summary-retention-videos.db'}")
+    Base.metadata.create_all(engine)
+    now = datetime.now(UTC).replace(tzinfo=None)
+    with Session(engine) as session:
+        session.add_all([
+            VideoMetricSnapshot(youtube_video_id="same", title="Old", views=1, retention_json='[{"elapsed_ratio": 0, "audience_retention": 1}]', analytics_end_date=date(2026, 9, 5), captured_at=now - timedelta(days=1)),
+            VideoMetricSnapshot(youtube_video_id="same", title="Current", views=1, retention_json='[{"elapsed_ratio": 0, "audience_retention": 1}]', analytics_end_date=date(2026, 9, 6), captured_at=now),
+            VideoMetricSnapshot(youtube_video_id="no-views", title="Retention only", views=None, retention_json='[{"elapsed_ratio": 0, "audience_retention": 1}]', captured_at=now),
+            VideoMetricSnapshot(youtube_video_id="empty", retention_json='[]', captured_at=now),
+        ])
+        session.commit()
+        summary = analytics_summary(session)
+
+    assert summary["retention_videos"] == [
+        {"id": "no-views", "title": "Retention only"},
+        {"id": "same", "title": "Current"},
+    ]
