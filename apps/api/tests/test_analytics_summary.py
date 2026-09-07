@@ -44,3 +44,25 @@ def test_summary_returns_null_leaders_and_empty_traffic_without_available_eviden
     assert summary["top_long_form"] is None
     assert summary["top_short"] is None
     assert summary["traffic_sources"] == {}
+
+
+def test_summary_exposes_persisted_metrics_video_choices_and_all_required_topics(tmp_path):
+    """A dashboard screen must distinguish stored evidence from unavailable fields."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'summary-details.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(VideoMetricSnapshot(
+            youtube_video_id="fishing-video", title="Fishing evidence", topic="Fishing", views=10,
+            impressions=100, ctr=.1, avg_view_duration_seconds=20, average_percentage_viewed=.5,
+            subscriber_conversion_rate=.02, returning_viewers=3, views_1h=4, views_24h=8,
+            views_7d=10, browse_share=.4,
+        ))
+        session.commit()
+        summary = analytics_summary(session)
+
+    assert summary["impressions"] == {"value": 100, "coverage": 1}
+    assert summary["avg_view_duration_seconds"] == {"value": 20, "coverage": 1}
+    assert summary["traffic_source_coverage"] == {"Browse": 1}
+    assert summary["videos"] == [{"id": "fishing-video", "title": "Fishing evidence", "views": 10}]
+    assert summary["topics"]["Fishing"] == {"value": 10, "coverage": 1}
+    assert summary["topics"]["Namibia travel"] == {"value": None, "coverage": 0}

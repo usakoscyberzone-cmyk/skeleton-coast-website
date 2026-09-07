@@ -1,4 +1,4 @@
-import type { DashboardSummary, MediaFile, ProjectDetail, ProjectSummary, Recommendation, YouTubeStatus } from "../types";
+import type { DashboardSummary, LearningPattern, MediaFile, ProjectDetail, ProjectSummary, Recommendation, RetentionData, YouTubeStatus } from "../types";
 
 const baseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -21,8 +21,11 @@ function mediaFile(value: unknown, endpoint: string): MediaFile {
   return { id: value.id as number, path: value.path as string, kind: value.kind as string, duration_seconds: value.duration_seconds as number | null, width: value.width as number | null, height: value.height as number | null, frame_rate: value.frame_rate as number | null, codec: value.codec as string | null, probe_error: value.probe_error as string | null };
 }
 function dashboard(value: unknown): DashboardSummary {
-  if (!isRecord(value) || typeof value.video_count !== "number" || !metric(value.views) || !metric(value.watch_minutes) || !metric(value.subscribers_gained) || !video(value.top_long_form) || !video(value.top_short) || !isRecord(value.traffic_sources) || Object.values(value.traffic_sources).some((share) => typeof share !== "number") || !(value.realtime_views === undefined || numberOrNull(value.realtime_views))) return invalid("/analytics/summary");
-  return { video_count: value.video_count as number, views: value.views as DashboardSummary["views"], watch_minutes: value.watch_minutes as DashboardSummary["watch_minutes"], subscribers_gained: value.subscribers_gained as DashboardSummary["subscribers_gained"], realtime_views: value.realtime_views as number | null | undefined, top_long_form: value.top_long_form as DashboardSummary["top_long_form"], top_short: value.top_short as DashboardSummary["top_short"], traffic_sources: value.traffic_sources as Record<string, number> };
+  const metricFields = ["views", "watch_minutes", "subscribers_gained", "impressions", "ctr", "avg_view_duration_seconds", "average_percentage_viewed", "subscriber_conversion_rate", "returning_viewers", "views_1h", "views_24h", "views_7d"] as const;
+  const required = ["views", "watch_minutes", "subscribers_gained"] as const;
+  if (!isRecord(value) || typeof value.video_count !== "number" || required.some((field) => !metric(value[field])) || metricFields.some((field) => value[field] !== undefined && !metric(value[field])) || !video(value.top_long_form) || !video(value.top_short) || !isRecord(value.traffic_sources) || Object.values(value.traffic_sources).some((share) => typeof share !== "number") || (value.traffic_source_coverage !== undefined && (!isRecord(value.traffic_source_coverage) || Object.values(value.traffic_source_coverage).some((coverage) => typeof coverage !== "number"))) || (value.videos !== undefined && (!Array.isArray(value.videos) || value.videos.some((item) => !video(item)))) || (value.topics !== undefined && (!isRecord(value.topics) || Object.values(value.topics).some((item) => !metric(item)))) || !(value.realtime_views === undefined || numberOrNull(value.realtime_views))) return invalid("/analytics/summary");
+  const unavailable = { value: null, coverage: 0 };
+  return { ...value, ...Object.fromEntries(metricFields.map((field) => [field, value[field] ?? unavailable])), traffic_source_coverage: value.traffic_source_coverage ?? {}, videos: value.videos ?? [], topics: value.topics ?? {} } as DashboardSummary;
 }
 function metric(value: unknown) { return isRecord(value) && numberOrNull(value.value) && typeof value.coverage === "number"; }
 function video(value: unknown) { return value === null || (isRecord(value) && typeof value.id === "string" && typeof value.title === "string" && typeof value.views === "number"); }
@@ -44,6 +47,11 @@ async function getJson<T>(path: string, validate: (value: unknown) => T): Promis
 export function getProjects(): Promise<ProjectSummary[]> { return getJson("/projects", (value) => Array.isArray(value) ? value.map((item) => project(item, "/projects")) : invalid("/projects")); }
 export function getProject(id: string | number): Promise<ProjectDetail> { return getJson(`/projects/${id}`, (value) => { const base = project(value, `/projects/${id}`); if (!isRecord(value) || !Array.isArray(value.media_files)) return invalid(`/projects/${id}`); return { ...base, media_files: value.media_files.map((item) => mediaFile(item, `/projects/${id}`)) }; }); }
 export function getDashboardSummary(): Promise<DashboardSummary> { return getJson("/analytics/summary", dashboard); }
+export function getRetention(videoId: string): Promise<RetentionData> { return getJson(`/analytics/videos/${encodeURIComponent(videoId)}/retention`, (value) => isRecord(value) && typeof value.video_id === "string" && (value.retention === null || isRecord(value.retention)) ? value as unknown as RetentionData : invalid("/analytics/videos/:id/retention")); }
+export async function getLearningPatterns(): Promise<LearningPattern[]> {
+  try { return await getJson("/learning/patterns", (value) => Array.isArray(value) && value.every((item) => isRecord(item) && typeof item.id === "number" && typeof item.topic === "string" && typeof item.pattern_type === "string" && typeof item.summary === "string" && typeof item.confidence === "string" && typeof item.evidence_count === "number") ? value as LearningPattern[] : invalid("/learning/patterns")); }
+  catch (error) { if (error instanceof ApiError && error.status === 404) return []; throw error; }
+}
 export function getYouTubeStatus(): Promise<YouTubeStatus> { return getJson("/youtube/status", (value) => { if (!isRecord(value) || typeof value.status !== "string" || !stringOrUndefined(value.detail) || !stringOrUndefined(value.channel_title) || !stringOrUndefined(value.channel_id)) return invalid("/youtube/status"); return { status: value.status, detail: value.detail as string | undefined, channel_title: value.channel_title as string | undefined, channel_id: value.channel_id as string | undefined }; }); }
 export async function getActiveRecommendations(): Promise<Recommendation[]> {
   try { return await getJson("/recommendations/active", (value) => Array.isArray(value) ? value.map(recommendation) : invalid("/recommendations/active")); }

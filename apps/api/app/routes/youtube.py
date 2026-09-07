@@ -176,18 +176,36 @@ def analytics_summary(session: Session = Depends(get_session)) -> dict:
     # Shares are already normalized per video. Weight each source only by videos
     # that supplied both that source and views; missing source data is not zero.
     traffic_sources = {}
+    traffic_source_coverage = {}
     for label, field in (("Browse", "browse_share"), ("Suggested", "suggested_share"), ("Search", "search_share"), ("External", "external_share"), ("Shorts Feed", "shorts_feed_share")):
         contributing = [row for row in latest if row.views is not None and getattr(row, field) is not None]
         if contributing:
+            traffic_source_coverage[label] = len(contributing)
             denominator = sum(row.views for row in contributing)
             if denominator:
                 traffic_sources[label] = sum(row.views * getattr(row, field) for row in contributing) / denominator
+    topics = {}
+    for topic in ("Fishing", "Namibia travel", "Angola", "History", "4x4", "Current events"):
+        matching = [row.views for row in latest if row.topic == topic and row.views is not None]
+        topics[topic] = {"value": sum(matching) if matching else None, "coverage": len(matching)}
+    videos = [
+        {"id": row.youtube_video_id, "title": row.title or row.youtube_video_id, "views": row.views}
+        for row in sorted(latest, key=lambda item: ((item.views is None), -(item.views or 0), item.youtube_video_id))
+        if row.views is not None
+    ]
     return {
         "video_count": len(latest),
         "views": aggregate("views"), "watch_minutes": aggregate("watch_minutes"), "subscribers_gained": aggregate("subscribers_gained"),
+        "impressions": aggregate("impressions"), "ctr": aggregate("ctr"),
+        "avg_view_duration_seconds": aggregate("avg_view_duration_seconds"),
+        "average_percentage_viewed": aggregate("average_percentage_viewed"),
+        "subscriber_conversion_rate": aggregate("subscriber_conversion_rate"),
+        "returning_viewers": aggregate("returning_viewers"),
+        "views_1h": aggregate("views_1h"), "views_24h": aggregate("views_24h"), "views_7d": aggregate("views_7d"),
         "top_long_form": leader("long"),
         "top_short": leader("short"),
-        "traffic_sources": traffic_sources,
+        "traffic_sources": traffic_sources, "traffic_source_coverage": traffic_source_coverage,
+        "videos": videos, "topics": topics,
     }
 
 
