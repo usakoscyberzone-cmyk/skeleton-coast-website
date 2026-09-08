@@ -54,6 +54,26 @@ def _cross_process_metadata_writer(project_path: str, marker: str, start, result
         results.put(("success", marker))
 
 
+def _crash_after_first_packaging_replace(
+    project_path: str, source_path: str, document: dict
+) -> None:
+    real_replace = asset_generator.os.replace
+
+    def replace_then_exit(source, target):
+        real_replace(source, target)
+        os._exit(73)
+
+    asset_generator.os.replace = replace_then_exit
+    asset_generator.update_packaging_candidates(
+        Path(project_path),
+        document,
+        "missing",
+        source_png=Path(source_path),
+        aspect="16:9",
+        label="A",
+    )
+
+
 def test_write_metadata_pack_creates_platform_files(tmp_path: Path):
     project = tmp_path / "Pilchard Mortality"
     (project / "Metadata").mkdir(parents=True)
@@ -766,6 +786,30 @@ def test_packaging_write_holds_thumbnail_directory_against_junction_swap(
             os.rmdir(thumbnails)
         if parked.exists():
             parked.rename(thumbnails)
+
+
+def test_packaging_crash_cannot_publish_manifest_before_referenced_thumbnail(
+    tmp_path: Path,
+):
+    project = tmp_path / "Project"
+    project.mkdir()
+    source = tmp_path / "approved.png"
+    source.write_bytes(PNG_BYTES)
+    process = multiprocessing.get_context("spawn").Process(
+        target=_crash_after_first_packaging_replace,
+        args=(str(project), str(source), _packaging_payload()),
+    )
+
+    process.start()
+    process.join(timeout=20)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
+
+    assert process.exitcode == 73
+    manifest = project / "Metadata" / "packaging-candidates.json"
+    thumbnail = project / "Thumbnails" / "thumbnail-A-16x9.png"
+    assert not manifest.exists() or thumbnail.exists()
 
 
 def test_packaging_api_registers_png_and_saves_complete_advisory_candidate(

@@ -595,9 +595,12 @@ def _commit_packaging_candidates(
     metadata_target = project_path / "Metadata" / "packaging-candidates.json"
     thumbnail_targets = _packaging_thumbnail_targets(project_path, document)
     pending_target = pending_thumbnail[0] if pending_thumbnail else None
-    files: dict[Path, str | bytes] = {metadata_target: rendered}
+    files: dict[Path, str | bytes] = {}
     if pending_thumbnail:
         files[pending_thumbnail[0]] = pending_thumbnail[1]
+    # Referenced content must become durable before its manifest. If the host
+    # stops between replaces, an orphan PNG is safe; a dangling manifest is not.
+    files[metadata_target] = rendered
     with _project_lock(project_path):
         with _interprocess_project_lock(project_path):
             with _hold_asset_directories(project_path, (metadata_target, *thumbnail_targets)):
