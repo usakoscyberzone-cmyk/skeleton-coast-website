@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -24,6 +25,9 @@ class _SmokeHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(encoded)))
+        fixture_token = self.headers.get("X-SCGD-Smoke-Fixture")
+        if fixture_token:
+            self.send_header("X-SCGD-Smoke-Fixture", fixture_token)
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -84,6 +88,8 @@ def test_smoke_test_uses_disposable_master_and_exercises_real_helper_sync(tmp_pa
         result = _run_script(
             REPO_ROOT / "scripts" / "smoke-test.ps1",
             "-TestMode",
+            "-FixtureToken",
+            "task13-controlled-fixture",
             "-MasterProjectFolder",
             str(master),
             "-ApiBaseUrl",
@@ -119,6 +125,8 @@ def test_smoke_test_missing_master_fails_with_creation_instruction(tmp_path):
     result = _run_script(
         REPO_ROOT / "scripts" / "smoke-test.ps1",
         "-TestMode",
+        "-FixtureToken",
+        "task13-missing-master-fixture",
         "-MasterProjectFolder",
         str(missing),
         "-PythonPath",
@@ -132,6 +140,146 @@ def test_smoke_test_missing_master_fails_with_creation_instruction(tmp_path):
     assert result.returncode != 0
     assert "New-Item -ItemType Directory -Path" in result.stdout
     assert str(missing) in result.stdout
+
+
+def test_test_mode_requires_an_explicit_disposable_master_and_never_defaults_to_i_drive():
+    omitted = _run_script(
+        REPO_ROOT / "scripts" / "smoke-test.ps1",
+        "-TestMode",
+        "-FixtureToken",
+        "task13-omitted-master",
+        "-ApiBaseUrl",
+        "http://127.0.0.1:49101",
+        "-WebUrl",
+        "http://127.0.0.1:49102",
+    )
+    i_drive = _run_script(
+        REPO_ROOT / "scripts" / "smoke-test.ps1",
+        "-TestMode",
+        "-FixtureToken",
+        "task13-i-drive",
+        "-MasterProjectFolder",
+        r"I:\YouTube Projects",
+        "-ApiBaseUrl",
+        "http://127.0.0.1:49101",
+        "-WebUrl",
+        "http://127.0.0.1:49102",
+    )
+
+    assert omitted.returncode != 0
+    assert "TestMode requires an explicit disposable -MasterProjectFolder" in omitted.stdout
+    assert i_drive.returncode != 0
+    assert "TestMode refuses every path on drive I:" in i_drive.stdout
+
+
+def test_test_mode_rejects_the_broad_system_temp_root():
+    temp_root = Path(subprocess.check_output(
+        [str(POWERSHELL), "-NoProfile", "-Command", "[IO.Path]::GetTempPath()"],
+        text=True,
+    ).strip())
+
+    result = _run_script(
+        REPO_ROOT / "scripts" / "smoke-test.ps1",
+        "-TestMode",
+        "-FixtureToken",
+        "task13-broad-root",
+        "-MasterProjectFolder",
+        str(temp_root),
+        "-ApiBaseUrl",
+        "http://127.0.0.1:49101",
+        "-WebUrl",
+        "http://127.0.0.1:49102",
+    )
+
+    assert result.returncode != 0
+    assert "strict child of the Windows temp folder" in result.stdout
+
+
+def test_test_mode_rejects_a_reparse_master_path(tmp_path):
+    real_master = tmp_path / "real-master"
+    real_master.mkdir()
+    linked_master = tmp_path / "linked-master"
+    try:
+        os.symlink(real_master, linked_master, target_is_directory=True)
+    except OSError:
+        created = subprocess.run(
+            [
+                str(POWERSHELL),
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "New-Item -ItemType Junction -Path $env:SCGD_LINK -Target $env:SCGD_TARGET | Out-Null",
+            ],
+            env={**os.environ, "SCGD_LINK": str(linked_master), "SCGD_TARGET": str(real_master)},
+            capture_output=True,
+            text=True,
+        )
+        assert created.returncode == 0, created.stdout + created.stderr
+
+    result = _run_script(
+        REPO_ROOT / "scripts" / "smoke-test.ps1",
+        "-TestMode",
+        "-FixtureToken",
+        "task13-reparse-fixture",
+        "-MasterProjectFolder",
+        str(linked_master),
+        "-ApiBaseUrl",
+        "http://127.0.0.1:49101",
+        "-WebUrl",
+        "http://127.0.0.1:49102",
+    )
+
+    assert result.returncode != 0
+    assert "reparse point or junction" in result.stdout
+
+
+def test_test_mode_requires_fixture_server_echo_before_helper_sync(tmp_path):
+    master = tmp_path / "YouTube Projects"
+    master.mkdir()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _SmokeHandler)
+    original_send = _SmokeHandler._send
+
+    def send_without_echo(self, status, payload, content_type):
+        token = self.headers.pop("X-SCGD-Smoke-Fixture", None)
+        try:
+            return original_send(self, status, payload, content_type)
+        finally:
+            if token:
+                self.headers["X-SCGD-Smoke-Fixture"] = token
+
+    _SmokeHandler._send = send_without_echo
+    _SmokeHandler.scan_count = 0
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result = _run_script(
+            REPO_ROOT / "scripts" / "smoke-test.ps1",
+            "-TestMode",
+            "-FixtureToken",
+            "task13-no-echo",
+            "-MasterProjectFolder",
+            str(master),
+            "-ApiBaseUrl",
+            base_url,
+            "-WebUrl",
+            base_url + "/web",
+            "-PythonPath",
+            sys.executable,
+            "-NodeCommand",
+            "node",
+            "-FfprobeCommand",
+            "node",
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        _SmokeHandler._send = original_send
+
+    assert result.returncode != 0
+    assert _SmokeHandler.scan_count == 0
+    assert "fixture identity" in result.stdout
 
 
 def test_api_and_web_start_scripts_offer_non_launching_dependency_checks():

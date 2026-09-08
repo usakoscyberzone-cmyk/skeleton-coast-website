@@ -6,12 +6,16 @@ param(
     [string]$WebUrl = "http://127.0.0.1:5173",
     [string]$PythonPath = "",
     [string]$NodeCommand = "node",
-    [string]$FfprobeCommand = "ffprobe"
+    [string]$FfprobeCommand = "ffprobe",
+    [string]$FixtureToken = ""
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $failed = $false
+$masterWasExplicit = $PSBoundParameters.ContainsKey("MasterProjectFolder")
+$apiWasExplicit = $PSBoundParameters.ContainsKey("ApiBaseUrl")
+$webWasExplicit = $PSBoundParameters.ContainsKey("WebUrl")
 
 function Pass([string]$Message) { Write-Host "$Message`: PASS" }
 function Fail([string]$Message) { Write-Host "$Message`: FAIL"; $script:failed = $true }
@@ -25,7 +29,43 @@ function Assert-LoopbackUrl([string]$Value, [string]$Name) {
     return $true
 }
 
-if (-not $TestMode -and $MasterProjectFolder -ne "I:\YouTube Projects") {
+if ($TestMode) {
+    if (-not $masterWasExplicit) {
+        Fail "TestMode requires an explicit disposable -MasterProjectFolder"
+    } else {
+        $testMaster = [IO.Path]::GetFullPath($MasterProjectFolder)
+        $testRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd("\")
+        $testPrefix = $testRoot + "\"
+        if ([IO.Path]::GetPathRoot($testMaster).TrimEnd("\") -ieq "I:") {
+            Fail "TestMode refuses every path on drive I:"
+        } elseif ($testMaster -ieq $testRoot -or -not $testMaster.StartsWith($testPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            Fail "TestMode master must be a strict child of the Windows temp folder"
+        } elseif (-not (Test-Path -LiteralPath $testMaster -PathType Container)) {
+            Fail "Master folder ($testMaster)"
+            Write-Host "Create it explicitly, then rerun: New-Item -ItemType Directory -Path '$testMaster'"
+        } else {
+            $cursor = Get-Item -LiteralPath $testMaster -Force
+            while ($cursor -and $cursor.FullName.StartsWith($testPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                if (($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    Fail "TestMode master path must not contain a reparse point or junction"
+                    break
+                }
+                $cursor = $cursor.Parent
+            }
+            $MasterProjectFolder = $testMaster
+        }
+    }
+    if (-not $FixtureToken -or $FixtureToken.Length -lt 16) {
+        Fail "TestMode requires an explicit fixture identity token of at least 16 characters"
+    }
+    if (-not $apiWasExplicit -or -not $webWasExplicit) {
+        Fail "TestMode requires explicit fixture API and web URLs"
+    }
+    if ($failed) {
+        Write-Host "SMOKE TEST: FAIL"
+        exit 2
+    }
+} elseif ($MasterProjectFolder -ne "I:\YouTube Projects") {
     Fail "V1 master folder must be I:\YouTube Projects"
 }
 if (-not $PythonPath) {
@@ -61,22 +101,34 @@ if (Test-Path -LiteralPath $MasterProjectFolder -PathType Container) {
 
 $apiIsLocal = Assert-LoopbackUrl $ApiBaseUrl "API_BASE_URL"
 $webIsLocal = Assert-LoopbackUrl $WebUrl "Web URL"
+$requestHeaders = @{}
+if ($TestMode) { $requestHeaders["X-SCGD-Smoke-Fixture"] = $FixtureToken }
 
 if ($apiIsLocal) {
     try {
-        $healthResponse = Invoke-WebRequest -UseBasicParsing -Uri ($ApiBaseUrl.TrimEnd("/") + "/health") -TimeoutSec 10
+        $healthResponse = Invoke-WebRequest -UseBasicParsing -Headers $requestHeaders -Uri ($ApiBaseUrl.TrimEnd("/") + "/health") -TimeoutSec 10
         $health = $healthResponse.Content | ConvertFrom-Json
         if ($healthResponse.StatusCode -ne 200 -or $health.status -ne "ok") { throw "unexpected health response" }
+        if ($TestMode -and $healthResponse.Headers["X-SCGD-Smoke-Fixture"] -ne $FixtureToken) {
+            throw "fixture identity was not echoed by the API"
+        }
         Pass "API /health"
-    } catch { Fail "API /health" }
+    } catch {
+        if ($TestMode) { Fail "API fixture identity" } else { Fail "API /health" }
+    }
 }
 
 if ($webIsLocal) {
     try {
-        $webResponse = Invoke-WebRequest -UseBasicParsing -Uri $WebUrl -TimeoutSec 10
+        $webResponse = Invoke-WebRequest -UseBasicParsing -Headers $requestHeaders -Uri $WebUrl -TimeoutSec 10
         if ($webResponse.StatusCode -ne 200 -or -not $webResponse.Content) { throw "unexpected web response" }
+        if ($TestMode -and $webResponse.Headers["X-SCGD-Smoke-Fixture"] -ne $FixtureToken) {
+            throw "fixture identity was not echoed by the web fixture"
+        }
         Pass "Web app"
-    } catch { Fail "Web app" }
+    } catch {
+        if ($TestMode) { Fail "Web fixture identity" } else { Fail "Web app" }
+    }
 }
 
 if (-not $failed -and $apiIsLocal) {
@@ -100,7 +152,11 @@ if (-not $failed -and $apiIsLocal) {
 if ($apiIsLocal) {
     $youtubeStatus = $null
     try {
-        $youtube = Invoke-RestMethod -Uri ($ApiBaseUrl.TrimEnd("/") + "/youtube/status") -TimeoutSec 10
+        $youtubeResponse = Invoke-WebRequest -UseBasicParsing -Headers $requestHeaders -Uri ($ApiBaseUrl.TrimEnd("/") + "/youtube/status") -TimeoutSec 10
+        if ($TestMode -and $youtubeResponse.Headers["X-SCGD-Smoke-Fixture"] -ne $FixtureToken) {
+            throw "fixture identity was not echoed by YouTube status"
+        }
+        $youtube = $youtubeResponse.Content | ConvertFrom-Json
         $youtubeStatus = [string]$youtube.status
     } catch {
         $errorBody = $_.ErrorDetails.Message
