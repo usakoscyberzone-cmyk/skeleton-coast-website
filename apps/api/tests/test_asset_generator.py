@@ -684,8 +684,9 @@ def test_save_thumbnail_variant_rejects_overwrite_by_default(tmp_path: Path):
 
 def test_packaging_candidates_are_written_as_deterministic_project_json(tmp_path: Path):
     project = tmp_path / "Project"
-    project.mkdir()
+    (project / "Thumbnails").mkdir(parents=True)
     payload = _packaging_payload()
+    (project / "Thumbnails" / "thumbnail-A-16x9.png").write_bytes(PNG_BYTES)
 
     path = asset_generator.write_packaging_candidates(project, payload)
 
@@ -702,6 +703,69 @@ def test_empty_packaging_read_still_rejects_unsafe_project_root(tmp_path: Path, 
 
     with pytest.raises(UnsafeAssetPathError):
         asset_generator.read_packaging_candidates(project)
+
+
+def test_packaging_write_rejects_reparse_thumbnail_directory_inside_transaction(
+    tmp_path: Path, monkeypatch
+):
+    project = tmp_path / "Project"
+    thumbnails = project / "Thumbnails"
+    thumbnails.mkdir(parents=True)
+    (thumbnails / "thumbnail-A-16x9.png").write_bytes(PNG_BYTES)
+    monkeypatch.setattr(
+        asset_generator,
+        "_is_reparse_point",
+        lambda path: Path(path) == thumbnails,
+    )
+
+    with pytest.raises(UnsafeAssetPathError):
+        asset_generator.write_packaging_candidates(project, _packaging_payload())
+
+    assert not (project / "Metadata" / "packaging-candidates.json").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
+def test_packaging_write_holds_thumbnail_directory_against_junction_swap(
+    tmp_path: Path, monkeypatch
+):
+    project = tmp_path / "Project"
+    thumbnails = project / "Thumbnails"
+    thumbnails.mkdir(parents=True)
+    (thumbnails / "thumbnail-A-16x9.png").write_bytes(PNG_BYTES)
+    outside = tmp_path / "Outside"
+    outside.mkdir()
+    parked = project / "Thumbnails-parked"
+    real_stage = asset_generator._stage_file
+    swap_attempted = False
+    swap_blocked = False
+
+    def attempt_swap(target: Path, content: str | bytes) -> Path:
+        nonlocal swap_attempted, swap_blocked
+        if target.name == "packaging-candidates.json" and not swap_attempted:
+            swap_attempted = True
+            try:
+                thumbnails.rename(parked)
+            except OSError:
+                swap_blocked = True
+            else:
+                result = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(thumbnails), str(outside)],
+                    capture_output=True, text=True, check=False,
+                )
+                assert result.returncode == 0, result.stderr
+        return real_stage(target, content)
+
+    monkeypatch.setattr(asset_generator, "_stage_file", attempt_swap)
+    try:
+        asset_generator.write_packaging_candidates(project, _packaging_payload())
+        assert swap_attempted
+        assert swap_blocked
+        assert list(outside.iterdir()) == []
+    finally:
+        if asset_generator._is_reparse_point(thumbnails):
+            os.rmdir(thumbnails)
+        if parked.exists():
+            parked.rename(thumbnails)
 
 
 def test_packaging_api_registers_png_and_saves_complete_advisory_candidate(
@@ -724,14 +788,16 @@ def test_packaging_api_registers_png_and_saves_complete_advisory_candidate(
     assert thumbnail.status_code == 201
     assert thumbnail.json() == {"file": "Thumbnails/thumbnail-A-16x9.png"}
     assert packaging.status_code == 201
-    assert packaging.json() == {"file": "Metadata/packaging-candidates.json"}
+    assert packaging.json()["file"] == "Metadata/packaging-candidates.json"
+    assert len(packaging.json()["revision"]) == 64
     assert loaded.status_code == 200
-    assert loaded.json() == _packaging_payload()
+    assert loaded.json()["candidates"] == _packaging_payload()["candidates"]
+    assert loaded.json()["revision"] == packaging.json()["revision"]
     assert "advisory" not in json.dumps(loaded.json()).lower()  # scores are data, UI supplies label
     session.close()
 
 
-def test_packaging_api_explicitly_updates_json_for_additional_candidate(
+def test_packaging_api_uses_revision_cas_for_additional_candidate(
     tmp_path: Path, monkeypatch
 ):
     client, session, project, _master = _asset_client(tmp_path, monkeypatch)
@@ -749,12 +815,18 @@ def test_packaging_api_explicitly_updates_json_for_additional_candidate(
     second["title"] = "A second packaging direction"
     second["thumbnail"]["file"] = "Thumbnails/thumbnail-B-16x9.png"
 
+    revision = client.get(f"/projects/{project.id}/assets/packaging").json()["revision"]
     response = client.put(
         f"/projects/{project.id}/assets/packaging",
-        json={"candidates": [first["candidates"][0], second], "overwrite": True},
+        json={"candidates": [first["candidates"][0], second], "expected_revision": revision},
+    )
+    stale = client.put(
+        f"/projects/{project.id}/assets/packaging",
+        json={"candidates": [{**first["candidates"][0], "title": "Stale overwrite"}], "expected_revision": revision},
     )
 
     assert response.status_code == 201
+    assert stale.status_code == 409
     assert [candidate["label"] for candidate in client.get(
         f"/projects/{project.id}/assets/packaging"
     ).json()["candidates"]] == ["A", "B"]

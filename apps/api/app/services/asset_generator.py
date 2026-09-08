@@ -561,13 +561,92 @@ def _validate_packaging_document(document: Mapping[str, Any]) -> None:
             raise ValueError("advisory scores must be integers from 0 to 100")
 
 
+def _packaging_thumbnail_targets(project_path: Path, document: Mapping[str, Any]) -> list[Path]:
+    return [project_path / Path(candidate["thumbnail"]["file"]) for candidate in document["candidates"]]
+
+
+def _packaging_revision(content: bytes | None) -> str:
+    return "missing" if content is None else hashlib.sha256(content).hexdigest()
+
+
+def _validate_thumbnail_references(targets: Iterable[Path], pending: Path | None = None) -> None:
+    for target in targets:
+        if pending is not None and target == pending:
+            continue
+        if not target.is_file() or _is_reparse_point(target):
+            raise ValueError(f"Thumbnail {target.stem} is not registered")
+        try:
+            if not target.read_bytes().startswith(_PNG_SIGNATURE):
+                raise ValueError(f"Thumbnail {target.stem} is not a PNG file")
+        except OSError as exc:
+            raise UnsafeAssetPathError("Thumbnail reference changed during validation") from exc
+
+
+def _commit_packaging_candidates(
+    project_path: Path,
+    document: Mapping[str, Any],
+    *,
+    overwrite: bool = False,
+    expected_revision: str | None = None,
+    pending_thumbnail: tuple[Path, bytes] | None = None,
+) -> tuple[Path, str]:
+    _validate_packaging_document(document)
+    rendered = (json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    metadata_target = project_path / "Metadata" / "packaging-candidates.json"
+    thumbnail_targets = _packaging_thumbnail_targets(project_path, document)
+    pending_target = pending_thumbnail[0] if pending_thumbnail else None
+    files: dict[Path, str | bytes] = {metadata_target: rendered}
+    if pending_thumbnail:
+        files[pending_thumbnail[0]] = pending_thumbnail[1]
+    with _project_lock(project_path):
+        with _interprocess_project_lock(project_path):
+            with _hold_asset_directories(project_path, (metadata_target, *thumbnail_targets)):
+                current = metadata_target.read_bytes() if metadata_target.exists() else None
+                if expected_revision is not None and _packaging_revision(current) != expected_revision:
+                    raise AssetConflictError("Packaging candidates changed; reload before saving")
+                if pending_target is not None and pending_target.exists():
+                    raise AssetConflictError("Thumbnail variant already exists")
+                _validate_thumbnail_references(thumbnail_targets, pending_target)
+                commit_overwrite = overwrite or (expected_revision is not None and current is not None)
+                _commit_files(files, overwrite=commit_overwrite)
+    return metadata_target, _packaging_revision(rendered)
+
+
 def write_packaging_candidates(
     project_path: Path, document: Mapping[str, Any], *, overwrite: bool = False
 ) -> Path:
-    _validate_packaging_document(document)
-    rendered = json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    target = project_path / "Metadata" / "packaging-candidates.json"
-    return _write_files({target: rendered}, overwrite=overwrite)[0]
+    return _commit_packaging_candidates(project_path, document, overwrite=overwrite)[0]
+
+
+def update_packaging_candidates(
+    project_path: Path,
+    document: Mapping[str, Any],
+    expected_revision: str,
+    *,
+    source_png: Path | None = None,
+    aspect: Literal["16:9", "9:16"] | None = None,
+    label: str | None = None,
+) -> tuple[Path, str]:
+    pending: tuple[Path, bytes] | None = None
+    supplied = (source_png is not None, aspect is not None, label is not None)
+    if any(supplied) and not all(supplied):
+        raise ValueError("thumbnail registration requires source, aspect, and label")
+    if source_png is not None and aspect is not None and label is not None:
+        if aspect not in _THUMBNAIL_ASPECTS or label not in _THUMBNAIL_LABELS:
+            raise ValueError("invalid thumbnail registration")
+        target = project_path / "Thumbnails" / f"thumbnail-{label}-{_THUMBNAIL_ASPECTS[aspect]}.png"
+        expected_file = f"Thumbnails/{target.name}"
+        if not any(
+            candidate["label"] == label
+            and candidate["thumbnail"]["aspect"] == aspect
+            and candidate["thumbnail"]["file"] == expected_file
+            for candidate in document.get("candidates", [])
+        ):
+            raise ValueError("thumbnail registration does not match a packaging candidate")
+        pending = (target, _validate_source_png(source_png))
+    return _commit_packaging_candidates(
+        project_path, document, expected_revision=expected_revision, pending_thumbnail=pending
+    )
 
 
 def read_packaging_candidates(project_path: Path) -> dict[str, Any]:
@@ -583,3 +662,23 @@ def read_packaging_candidates(project_path: Path) -> dict[str, Any]:
                     raise ValueError("invalid packaging candidate file")
                 _validate_packaging_document(document)
                 return document
+
+
+def read_packaging_snapshot(project_path: Path) -> tuple[dict[str, Any], str]:
+    _validate_project_root(project_path)
+    target = project_path / "Metadata" / "packaging-candidates.json"
+    if not target.exists():
+        return {"candidates": []}, "missing"
+    with _project_lock(project_path):
+        with _interprocess_project_lock(project_path):
+            thumbnail_targets: list[Path] = []
+            with _hold_asset_directories(project_path, (target,)):
+                content = target.read_bytes()
+                document = json.loads(content.decode("utf-8"))
+                if not isinstance(document, dict):
+                    raise ValueError("invalid packaging candidate file")
+                _validate_packaging_document(document)
+                thumbnail_targets = _packaging_thumbnail_targets(project_path, document)
+            with _hold_asset_directories(project_path, thumbnail_targets):
+                _validate_thumbnail_references(thumbnail_targets)
+            return document, _packaging_revision(content)

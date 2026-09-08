@@ -24,9 +24,9 @@ from ..services.asset_generator import (
     UnsafeAssetPathError,
     _is_reparse_point,
     generate_asset_pack,
-    read_packaging_candidates,
+    read_packaging_snapshot,
     save_thumbnail_variant,
-    write_packaging_candidates,
+    update_packaging_candidates,
 )
 
 
@@ -209,7 +209,12 @@ class PackagingPayload(BaseModel):
 
 
 class PackagingSavePayload(PackagingPayload):
-    overwrite: bool = False
+    expected_revision: str = Field(default="missing", pattern=r"^(missing|[0-9a-f]{64})$")
+    thumbnail_registration: ThumbnailPayload | None = None
+
+
+class PackagingReadPayload(PackagingPayload):
+    revision: str
 
 
 def _registered_project_path(project: Project) -> Path:
@@ -316,23 +321,27 @@ def save_packaging(
     try:
         project_path = _registered_project_path(project)
         document = PackagingPayload(candidates=payload.candidates).model_dump()
-        for candidate in payload.candidates:
-            thumbnail = project_path / Path(candidate.thumbnail.file)
-            if not thumbnail.is_file() or _is_reparse_point(thumbnail):
-                raise ValueError(f"Thumbnail {candidate.label} is not registered")
-        path = write_packaging_candidates(project_path, document, overwrite=payload.overwrite)
+        registration = payload.thumbnail_registration
+        path, revision = update_packaging_candidates(
+            project_path,
+            document,
+            payload.expected_revision,
+            source_png=Path(registration.source_png) if registration else None,
+            aspect=registration.aspect if registration else None,
+            label=registration.label if registration else None,
+        )
     except AssetConflictError as exc:
-        raise HTTPException(status_code=409, detail="Packaging candidates already exist") from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except UnsafeAssetPathError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Packaging save failed") from exc
-    return {"file": path.relative_to(project_path).as_posix()}
+    return {"file": path.relative_to(project_path).as_posix(), "revision": revision}
 
 
-@router.get("/{project_id}/assets/packaging", response_model=PackagingPayload)
+@router.get("/{project_id}/assets/packaging", response_model=PackagingReadPayload)
 def get_packaging(
     project_id: int,
     session: Session = Depends(get_session),
@@ -340,8 +349,8 @@ def get_packaging(
     project = _project_or_404(project_id, session)
     try:
         project_path = _registered_project_path(project)
-        document = read_packaging_candidates(project_path)
-        return PackagingPayload.model_validate(document).model_dump()
+        document, revision = read_packaging_snapshot(project_path)
+        return PackagingReadPayload(**document, revision=revision).model_dump()
     except UnsafeAssetPathError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (ValueError, OSError) as exc:

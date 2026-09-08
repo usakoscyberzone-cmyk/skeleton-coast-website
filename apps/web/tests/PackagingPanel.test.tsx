@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { ProjectDetailPage } from "../src/pages/ProjectDetailPage";
 
 const fetchMock = vi.fn();
+const revisionA = "a".repeat(64);
 
 beforeEach(() => {
   fetchMock.mockReset();
@@ -27,7 +28,7 @@ describe("PackagingPanel", () => {
     fetchMock.mockImplementation((url: string) => {
       if (url === "/projects/1") return json({ id: 1, name: "Coast", path: "I:\\YouTube Projects\\Coast", media_files: [] });
       if (url === "/projects/1/shorts") return json([]);
-      return json({ candidates: [{
+      return json({ revision: revisionA, candidates: [{
         label: "A", title: "A Skeleton Coast mystery", thumbnail: { aspect: "16:9", file: "Thumbnails/thumbnail-A-16x9.png" },
         hook: "See what the tide revealed", seo_description: "A field report", tags: ["Namibia"],
         pinned_comment: "What do you think?", chapters: "00:00 Opening", playlist: "Field reports",
@@ -55,7 +56,7 @@ describe("PackagingPanel", () => {
     });
     renderDetail();
     expect(await screen.findByText(/Loading packaging candidates/i)).toBeInTheDocument();
-    resolvePackaging(new Response(JSON.stringify({ candidates: [] })));
+    resolvePackaging(new Response(JSON.stringify({ revision: "missing", candidates: [] })));
     expect(await screen.findByText(/No packaging candidates saved/i)).toBeInTheDocument();
   });
 
@@ -63,9 +64,8 @@ describe("PackagingPanel", () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === "/projects/1") return json({ id: 1, name: "Coast", path: "I:\\YouTube Projects\\Coast", media_files: [] });
       if (url === "/projects/1/shorts") return json([]);
-      if (!init?.method) return json({ candidates: [] });
-      if (url.endsWith("/thumbnails")) return json({ file: "Thumbnails/thumbnail-A-16x9.png" }, 201);
-      return json({ file: "Metadata/packaging-candidates.json" }, 201);
+      if (!init?.method) return json({ revision: "missing", candidates: [] });
+      return json({ file: "Metadata/packaging-candidates.json", revision: revisionA }, 201);
     });
     renderDetail();
     await screen.findByText(/No packaging candidates saved/i);
@@ -83,11 +83,33 @@ describe("PackagingPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /Save local candidate/i }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
-      "/projects/1/assets/thumbnails", expect.objectContaining({ method: "POST" }),
-    ));
-    expect(fetchMock).toHaveBeenCalledWith(
       "/projects/1/assets/packaging", expect.objectContaining({ method: "PUT" }),
-    );
+    ));
+    expect(fetchMock.mock.calls.some(([url]) => url === "/projects/1/assets/thumbnails")).toBe(false);
     expect(await screen.findByText(/saved inside this project/i)).toBeInTheDocument();
+  });
+
+  it("does not silently overwrite packaging changed by another session", async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/projects/1") return json({ id: 1, name: "Coast", path: "I:\\YouTube Projects\\Coast", media_files: [] });
+      if (url === "/projects/1/shorts") return json([]);
+      if (!init?.method) return json({ revision: revisionA, candidates: [{
+        label: "A", title: "First title", thumbnail: { aspect: "16:9", file: "Thumbnails/thumbnail-A-16x9.png" }, hook: "Hook", seo_description: "Description", tags: ["Namibia"], pinned_comment: "Comment", chapters: "00:00 Start", playlist: "Reports", next_video_cta: "Watch next", scores: { curiosity: 50, clarity: 50, search_relevance: 50, audience_fit: 50, uniqueness: 50, title_thumbnail_complementarity: 50 }, rationale: "Clear pairing.",
+      }] });
+      return json({ detail: "Packaging candidates changed; reload before saving" }, 409);
+    });
+    renderDetail();
+    await screen.findByRole("heading", { name: /Candidate A/i });
+    fireEvent.change(screen.getByLabelText(/Title candidate/i), { target: { value: "Second title" } });
+    fireEvent.change(screen.getByLabelText(/Approved PNG path/i), { target: { value: "I:\\Approved\\b.png" } });
+    for (const [label, value] of [[/^Hook$/i, "Hook B"], [/SEO description/i, "Description B"], [/^Tags$/i, "Namibia"], [/Pinned comment/i, "Comment B"], [/^Chapters$/i, "00:00 Start"], [/^Playlist$/i, "Reports"], [/Next-video CTA/i, "Watch next"], [/Plain-language rationale/i, "Different pairing."]] as const) fireEvent.change(screen.getByLabelText(label), { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: /Save local candidate/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/changed.*reload/i);
+    expect(screen.getByRole("button", { name: /Reload packaging candidates/i })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Candidate B/i })).not.toBeInTheDocument();
+    const packagingWrite = fetchMock.mock.calls.find(([url, init]) => url === "/projects/1/assets/packaging" && init?.method === "PUT");
+    expect(JSON.parse(packagingWrite?.[1]?.body as string)).toMatchObject({ expected_revision: revisionA, thumbnail_registration: { source_png: "I:\\Approved\\b.png", label: "B" } });
+    expect(fetchMock.mock.calls.some(([url]) => url === "/projects/1/assets/thumbnails")).toBe(false);
   });
 });

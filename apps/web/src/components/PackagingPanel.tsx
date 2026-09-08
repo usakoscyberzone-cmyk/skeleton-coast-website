@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { getPackagingCandidates, registerThumbnail, savePackagingCandidates } from "../api/client";
+import { getPackagingCandidates, savePackagingCandidates } from "../api/client";
 import type { PackagingCandidate, PackagingDocument, PackagingLabel, PackagingScores, ThumbnailAspect } from "../types";
 import "./PackagingPanel.css";
 
@@ -30,7 +30,12 @@ export function PackagingPanel({ projectId }: { projectId: string | number }) {
   const [saved, setSaved] = useState(false);
   const [scores, setScores] = useState(initialScores);
 
-  useEffect(() => { getPackagingCandidates(projectId).then(setDocument).catch((error: Error) => setLoadError(error.message)); }, [projectId]);
+  function loadCandidates() {
+    setLoadError(null); setSaveError(null);
+    getPackagingCandidates(projectId).then(setDocument).catch((error: Error) => setLoadError(error.message));
+  }
+
+  useEffect(() => { loadCandidates(); }, [projectId]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setSaveError(null); setSaved(false);
@@ -47,10 +52,9 @@ export function PackagingPanel({ projectId }: { projectId: string | number }) {
       next_video_cta: String(form.get("next_video_cta")), scores, rationale: String(form.get("rationale")),
     };
     try {
-      await registerThumbnail(projectId, String(form.get("source_png")), aspect, label);
-      const next = { candidates: [...(document?.candidates ?? []), candidate] };
-      await savePackagingCandidates(projectId, next, (document?.candidates.length ?? 0) > 0);
-      setDocument(next); setSaved(true); formElement.reset(); setScores(initialScores());
+      const next = { candidates: [...(document?.candidates ?? []), candidate], revision: document?.revision ?? "missing" };
+      const result = await savePackagingCandidates(projectId, next, { source_png: String(form.get("source_png")), aspect, label });
+      setDocument({ candidates: next.candidates, revision: result.revision }); setSaved(true); formElement.reset(); setScores(initialScores());
     } catch (error) { setSaveError(error instanceof Error ? error.message : "Could not save candidate"); }
   }
 
@@ -69,7 +73,7 @@ export function PackagingPanel({ projectId }: { projectId: string | number }) {
       <label>Chapters<textarea name="chapters" required /></label><label>Playlist<input name="playlist" required /></label><label>Next-video CTA<textarea name="next_video_cta" required /></label>
       <fieldset><legend>Advisory scores</legend>{criteria.map(([key, label]) => <label key={key}>{label}<input aria-label={`${label} advisory score`} type="number" min="0" max="100" value={scores[key]} onChange={(event) => setScores({ ...scores, [key]: Number(event.target.value) })} required /></label>)}</fieldset>
       <label>Plain-language rationale<textarea name="rationale" required /></label><button type="submit">Save local candidate</button>
-      {saveError && <p role="alert">Could not save candidate: {saveError}</p>}{saved && <p role="status">Candidate saved inside this project. Review it before making any YouTube change.</p>}
+      {saveError && <><p role="alert">Could not save candidate: {saveError}</p>{/changed.*reload/i.test(saveError) && <button type="button" onClick={loadCandidates}>Reload packaging candidates</button>}</>}{saved && <p role="status">Candidate saved inside this project. Review it before making any YouTube change.</p>}
     </form>}
   </section>;
 }

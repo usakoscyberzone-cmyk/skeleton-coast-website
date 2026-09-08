@@ -52,4 +52,5 @@ export interface PackagingCandidate {
   chapters: string; playlist: string; next_video_cta: string;
   scores: PackagingScores; rationale: string;
 }
-export interface PackagingDocument { candidates: PackagingCandidate[]; }
+export interface PackagingDocument { candidates: PackagingCandidate[]; revision: string; }
+export interface ThumbnailRegistration { source_png: string; aspect: ThumbnailAspect; label: PackagingLabel; }
