@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import math
+import multiprocessing
 import os
 from pathlib import Path
 import subprocess
@@ -27,6 +28,29 @@ from app.services.asset_generator import (
     write_performance_report,
     write_short_cut_list,
 )
+
+
+def _cross_process_metadata_writer(project_path: str, marker: str, start, results) -> None:
+    pack = MetadataPack(
+        youtube_title=f"{marker} title",
+        youtube_description=marker * 500_000,
+        youtube_tags=[f"{marker} tag"],
+        pinned_comment=f"{marker} pinned",
+        facebook_caption=f"{marker} facebook",
+        instagram_caption=f"{marker} instagram",
+        chapters=f"{marker} chapters",
+    )
+    if not start.wait(timeout=10):
+        results.put(("error", marker, "start timeout"))
+        return
+    try:
+        write_metadata_pack(Path(project_path), pack)
+    except AssetConflictError:
+        results.put(("conflict", marker))
+    except BaseException as exc:
+        results.put(("error", marker, f"{type(exc).__name__}: {exc}"))
+    else:
+        results.put(("success", marker))
 
 
 def test_write_metadata_pack_creates_platform_files(tmp_path: Path):
@@ -287,6 +311,59 @@ def test_concurrent_default_writers_serialize_then_second_conflicts(
         assert len(first.result(timeout=5)) == 6
         with pytest.raises(AssetConflictError):
             second.result(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows inter-process locking behavior")
+def test_cross_process_default_writers_produce_one_coherent_pack_and_one_conflict(
+    tmp_path: Path,
+):
+    project = tmp_path / "Project"
+    metadata = project / "Metadata"
+    metadata.mkdir(parents=True)
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_cross_process_metadata_writer,
+            args=(str(project), marker, start, results),
+        )
+        for marker in ("ROUND_A_", "ROUND_B_")
+    ]
+
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(timeout=20)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+
+    assert [process.exitcode for process in processes] == [0, 0]
+    outcomes = [results.get(timeout=5), results.get(timeout=5)]
+    assert sorted(outcome[0] for outcome in outcomes) == ["conflict", "success"]
+    winner = next(outcome[1] for outcome in outcomes if outcome[0] == "success")
+    assert (metadata / "youtube.txt").read_text(encoding="utf-8") == (
+        f"{winner} title\n\n{winner * 500_000}\n"
+    )
+    assert (metadata / "tags.txt").read_text(encoding="utf-8") == f"{winner} tag\n"
+    assert (metadata / "pinned-comment.txt").read_text(encoding="utf-8") == (
+        f"{winner} pinned\n"
+    )
+    assert (metadata / "facebook.txt").read_text(encoding="utf-8") == f"{winner} facebook\n"
+    assert (metadata / "instagram.txt").read_text(encoding="utf-8") == (
+        f"{winner} instagram\n"
+    )
+    assert (metadata / "chapters.txt").read_text(encoding="utf-8") == f"{winner} chapters\n"
+    assert {path.name for path in metadata.iterdir()} == {
+        "youtube.txt",
+        "tags.txt",
+        "pinned-comment.txt",
+        "facebook.txt",
+        "instagram.txt",
+        "chapters.txt",
+    }
 
 
 def test_writer_rejects_reparse_output_directory(tmp_path: Path, monkeypatch):

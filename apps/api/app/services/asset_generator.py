@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+import hashlib
 import io
 import math
 import os
@@ -332,6 +333,48 @@ def _project_lock(project_path: Path) -> threading.RLock:
         return _PROJECT_LOCKS.setdefault(key, threading.RLock())
 
 
+@contextmanager
+def _interprocess_project_lock(project_path: Path) -> Iterator[None]:
+    if os.name != "nt":
+        yield
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    canonical_path = os.path.normcase(str(project_path.resolve(strict=False)))
+    identity = hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()
+    mutex_name = f"Local\\SkeletonCoastAssets-{identity}"
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_mutex = kernel32.CreateMutexW
+    create_mutex.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+    create_mutex.restype = wintypes.HANDLE
+    wait_for_single_object = kernel32.WaitForSingleObject
+    wait_for_single_object.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    wait_for_single_object.restype = wintypes.DWORD
+    release_mutex = kernel32.ReleaseMutex
+    release_mutex.argtypes = (wintypes.HANDLE,)
+    release_mutex.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    handle = create_mutex(None, False, mutex_name)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    acquired = False
+    try:
+        wait_result = wait_for_single_object(handle, 0xFFFFFFFF)
+        if wait_result not in {0x00000000, 0x00000080}:
+            raise ctypes.WinError(ctypes.get_last_error())
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            release_mutex(handle)
+        close_handle(handle)
+
+
 def _commit_files(files: dict[Path, str], *, overwrite: bool) -> list[Path]:
     if any(path.exists() for path in files) and not overwrite:
         raise AssetConflictError("One or more generated assets already exist")
@@ -381,7 +424,8 @@ def _write_files_locked(files: dict[Path, str], *, overwrite: bool) -> list[Path
 def _write_files(files: dict[Path, str], *, overwrite: bool = False) -> list[Path]:
     project_path = next(iter(files)).parents[1]
     with _project_lock(project_path):
-        return _write_files_locked(files, overwrite=overwrite)
+        with _interprocess_project_lock(project_path):
+            return _write_files_locked(files, overwrite=overwrite)
 
 
 def write_metadata_pack(
