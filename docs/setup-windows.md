@@ -177,7 +177,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\smoke-test.ps1
 
 It checks Python 3.12+, Node 20+, `ffprobe`, the exact master folder, API health, the web page, one real manual helper sync, and YouTube status. It accepts a connected channel or the clear setup states `authorization_required` and `configuration_required`. It does not start OAuth, create a project, alter media, or touch Resolve.
 
-`-TestMode` exists only for automated tests. It fails unless the caller explicitly supplies a pre-created, non-reparse directory strictly below the Windows temp folder, explicit localhost API/web URLs, and a fixture identity token echoed by those test servers. It rejects every `I:` path and never creates or deletes the disposable directory. Do not use it as the normal operating configuration.
+`-TestMode` exists only for automated tests. It ignores mutable `TEMP`/`TMP` values and instead derives the temp root from the Windows Local App Data known folder. It fails unless the caller explicitly supplies a pre-created directory whose handle-resolved identity is strictly below that canonical temp root, with no reparse/junction component anywhere in either path. It also requires explicit localhost API/web URLs and a fixture identity token echoed by those test servers before helper sync. It rejects lexical or resolved `I:` paths, broad roots, and prefix siblings, and never creates or deletes the disposable directory. Do not use it as the normal operating configuration.
 
 ## 9. Recover a replaced YouTube lock sidecar
 

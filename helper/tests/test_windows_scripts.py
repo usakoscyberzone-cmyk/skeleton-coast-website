@@ -15,6 +15,7 @@ POWERSHELL = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
 
 class _SmokeHandler(BaseHTTPRequestHandler):
     scan_count = 0
+    identity_count = 0
 
     def log_message(self, _format, *_args):
         return
@@ -32,6 +33,7 @@ class _SmokeHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def do_GET(self):
+        type(self).identity_count += 1
         if self.path == "/health":
             self._send(200, {"status": "ok"}, "application/json")
         elif self.path == "/youtube/status":
@@ -80,6 +82,7 @@ def test_smoke_test_uses_disposable_master_and_exercises_real_helper_sync(tmp_pa
     fake_ffprobe = tmp_path / "ffprobe.cmd"
     fake_ffprobe.write_text("@echo off\r\necho ffprobe version 7.1\r\n", encoding="utf-8")
     _SmokeHandler.scan_count = 0
+    _SmokeHandler.identity_count = 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), _SmokeHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -91,7 +94,7 @@ def test_smoke_test_uses_disposable_master_and_exercises_real_helper_sync(tmp_pa
             "-FixtureToken",
             "task13-controlled-fixture",
             "-MasterProjectFolder",
-            str(master),
+            str(master).upper(),
             "-ApiBaseUrl",
             base_url,
             "-WebUrl",
@@ -195,6 +198,35 @@ def test_test_mode_rejects_the_broad_system_temp_root():
     assert "strict child of the Windows temp folder" in result.stdout
 
 
+def test_test_mode_rejects_a_prefix_sibling_of_the_known_temp_root():
+    local_app_data = Path(subprocess.check_output(
+        [
+            str(POWERSHELL),
+            "-NoProfile",
+            "-Command",
+            "[Environment]::GetFolderPath('LocalApplicationData')",
+        ],
+        text=True,
+    ).strip())
+    prefix_sibling = local_app_data / "Temp-escape" / "fixture"
+
+    result = _run_script(
+        REPO_ROOT / "scripts" / "smoke-test.ps1",
+        "-TestMode",
+        "-FixtureToken",
+        "task13-prefix-sibling",
+        "-MasterProjectFolder",
+        str(prefix_sibling),
+        "-ApiBaseUrl",
+        "http://127.0.0.1:49101",
+        "-WebUrl",
+        "http://127.0.0.1:49102",
+    )
+
+    assert result.returncode != 0
+    assert "strict child of the Windows temp folder" in result.stdout
+
+
 def test_test_mode_rejects_a_reparse_master_path(tmp_path):
     real_master = tmp_path / "real-master"
     real_master.mkdir()
@@ -233,6 +265,46 @@ def test_test_mode_rejects_a_reparse_master_path(tmp_path):
     assert "reparse point or junction" in result.stdout
 
 
+def test_test_mode_does_not_trust_temp_environment_redirected_through_junction(tmp_path):
+    redirected_temp = tmp_path / "redirected-temp"
+    created = subprocess.run(
+        [
+            str(POWERSHELL),
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "New-Item -ItemType Junction -Path $env:SCGD_LINK -Target $env:SCGD_TARGET | Out-Null",
+        ],
+        env={**os.environ, "SCGD_LINK": str(redirected_temp), "SCGD_TARGET": str(REPO_ROOT / "apps")},
+        capture_output=True,
+        text=True,
+    )
+    assert created.returncode == 0, created.stdout + created.stderr
+    redirected_master = redirected_temp / "api"
+    redirected_environment = {
+        **os.environ,
+        "TEMP": str(redirected_temp),
+        "TMP": str(redirected_temp),
+    }
+
+    result = _run_script(
+        REPO_ROOT / "scripts" / "smoke-test.ps1",
+        "-TestMode",
+        "-FixtureToken",
+        "task13-redirected-temp",
+        "-MasterProjectFolder",
+        str(redirected_master),
+        "-ApiBaseUrl",
+        "http://127.0.0.1:49101",
+        "-WebUrl",
+        "http://127.0.0.1:49102",
+        env=redirected_environment,
+    )
+
+    assert result.returncode != 0
+    assert "reparse point or junction" in result.stdout
+
+
 def test_test_mode_requires_fixture_server_echo_before_helper_sync(tmp_path):
     master = tmp_path / "YouTube Projects"
     master.mkdir()
@@ -249,6 +321,7 @@ def test_test_mode_requires_fixture_server_echo_before_helper_sync(tmp_path):
 
     _SmokeHandler._send = send_without_echo
     _SmokeHandler.scan_count = 0
+    _SmokeHandler.identity_count = 0
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_port}"
@@ -257,7 +330,7 @@ def test_test_mode_requires_fixture_server_echo_before_helper_sync(tmp_path):
             REPO_ROOT / "scripts" / "smoke-test.ps1",
             "-TestMode",
             "-FixtureToken",
-            "task13-no-echo",
+            "task13-no-echo-fixture",
             "-MasterProjectFolder",
             str(master),
             "-ApiBaseUrl",
@@ -278,8 +351,9 @@ def test_test_mode_requires_fixture_server_echo_before_helper_sync(tmp_path):
         _SmokeHandler._send = original_send
 
     assert result.returncode != 0
+    assert _SmokeHandler.identity_count > 0
     assert _SmokeHandler.scan_count == 0
-    assert "fixture identity" in result.stdout
+    assert "API fixture identity: FAIL" in result.stdout
 
 
 def test_api_and_web_start_scripts_offer_non_launching_dependency_checks():

@@ -29,12 +29,62 @@ function Assert-LoopbackUrl([string]$Value, [string]$Name) {
     return $true
 }
 
+function Test-PathChainHasReparsePoint([string]$Path) {
+    $cursor = Get-Item -LiteralPath $Path -Force
+    while ($cursor) {
+        if (($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return $true
+        }
+        $cursor = $cursor.Parent
+    }
+    return $false
+}
+
+function Initialize-PathIdentityApi {
+    if ("ScgdPathIdentity" -as [type]) { return }
+    Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+public static class ScgdPathIdentity {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(
+        string name, uint access, uint share, IntPtr security,
+        uint creation, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(
+        SafeFileHandle handle, StringBuilder path, uint length, uint flags);
+
+    public static string ResolveDirectory(string path) {
+        using (SafeFileHandle handle = CreateFileW(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
+            if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+            StringBuilder result = new StringBuilder(32768);
+            uint length = GetFinalPathNameByHandleW(handle, result, (uint)result.Capacity, 0);
+            if (length == 0 || length >= result.Capacity) throw new Win32Exception(Marshal.GetLastWin32Error());
+            string value = result.ToString();
+            if (value.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) return @"\\" + value.Substring(8);
+            if (value.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase)) return value.Substring(4);
+            return value;
+        }
+    }
+}
+"@
+}
+
 if ($TestMode) {
     if (-not $masterWasExplicit) {
         Fail "TestMode requires an explicit disposable -MasterProjectFolder"
     } else {
         $testMaster = [IO.Path]::GetFullPath($MasterProjectFolder)
-        $testRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd("\")
+        $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
+        if (-not $localAppData) {
+            Fail "TestMode could not establish the Windows Local AppData known folder"
+        }
+        $testRoot = [IO.Path]::GetFullPath((Join-Path $localAppData "Temp")).TrimEnd("\")
         $testPrefix = $testRoot + "\"
         if ([IO.Path]::GetPathRoot($testMaster).TrimEnd("\") -ieq "I:") {
             Fail "TestMode refuses every path on drive I:"
@@ -44,13 +94,24 @@ if ($TestMode) {
             Fail "Master folder ($testMaster)"
             Write-Host "Create it explicitly, then rerun: New-Item -ItemType Directory -Path '$testMaster'"
         } else {
-            $cursor = Get-Item -LiteralPath $testMaster -Force
-            while ($cursor -and $cursor.FullName.StartsWith($testPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                if (($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    Fail "TestMode master path must not contain a reparse point or junction"
-                    break
+            if (-not (Test-Path -LiteralPath $testRoot -PathType Container)) {
+                Fail "TestMode could not verify the Windows temp folder"
+            } elseif ((Test-PathChainHasReparsePoint $testRoot) -or (Test-PathChainHasReparsePoint $testMaster)) {
+                Fail "TestMode master path must not contain a reparse point or junction"
+            } else {
+                try {
+                    Initialize-PathIdentityApi
+                    $canonicalRoot = [ScgdPathIdentity]::ResolveDirectory($testRoot).TrimEnd("\")
+                    $canonicalMaster = [ScgdPathIdentity]::ResolveDirectory($testMaster).TrimEnd("\")
+                    $canonicalPrefix = $canonicalRoot + "\"
+                    if ([IO.Path]::GetPathRoot($canonicalMaster).TrimEnd("\") -ieq "I:") {
+                        Fail "TestMode refuses a directory whose resolved identity is on drive I:"
+                    } elseif ($canonicalMaster -ieq $canonicalRoot -or -not $canonicalMaster.StartsWith($canonicalPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                        Fail "TestMode could not prove the directory is contained by the canonical Windows temp folder"
+                    }
+                } catch {
+                    Fail "TestMode could not prove canonical directory identity"
                 }
-                $cursor = $cursor.Parent
             }
             $MasterProjectFolder = $testMaster
         }
