@@ -52,6 +52,7 @@ class VideoMetricSnapshot(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     youtube_video_id: Mapped[str] = mapped_column(String(32), index=True)
+    channel_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     analytics_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     analytics_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)

@@ -6,7 +6,7 @@ import json
 from typing import Any
 from dataclasses import asdict, is_dataclass
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy import literal_column
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ from .youtube_client import RawVideoMetrics
 @dataclass(frozen=True)
 class MetricSnapshotInput:
     youtube_video_id: str
+    channel_id: str | None = None
     views: int | None = None
     impressions: int | None = None
     ctr: float | None = None
@@ -60,6 +61,7 @@ def normalize_metrics(raw: RawVideoMetrics | dict[str, object]) -> MetricSnapsho
     retention = raw.get("retention")
     return MetricSnapshotInput(
         youtube_video_id=str(raw["video_id"]),
+        channel_id=str(raw["channel_id"]) if raw.get("channel_id") else None,
         views=views,
         impressions=_as_int(raw.get("impressions")),
         ctr=_as_float(ctr),
@@ -147,7 +149,22 @@ def persist_metric_snapshot(
     }
     values["retention_json"] = json.dumps(metric.retention) if metric.retention is not None else None
     statement = sqlite_insert(VideoMetricSnapshot).values(youtube_video_id=metric.youtube_video_id, analytics_start_date=start_date, analytics_end_date=end_date, **values)
-    session.execute(statement.on_conflict_do_update(index_elements=[VideoMetricSnapshot.youtube_video_id, literal_column("coalesce(analytics_start_date, '')"), literal_column("coalesce(analytics_end_date, '')")], set_=values))
+    existing = session.scalar(select(VideoMetricSnapshot).where(
+        VideoMetricSnapshot.youtube_video_id == metric.youtube_video_id,
+        VideoMetricSnapshot.analytics_start_date == start_date,
+        VideoMetricSnapshot.analytics_end_date == end_date,
+    ))
+    if existing is not None and existing.channel_id and metric.channel_id and existing.channel_id != metric.channel_id:
+        raise ValueError("A metric snapshot's channel provenance is immutable")
+    update_values = dict(values)
+    update_values["channel_id"] = func.coalesce(VideoMetricSnapshot.channel_id, statement.excluded.channel_id)
+    update_values["topic"] = func.coalesce(statement.excluded.topic, VideoMetricSnapshot.topic)
+    update_values["ctr"] = func.coalesce(statement.excluded.ctr, VideoMetricSnapshot.ctr)
+    update_values["format"] = case(
+        (statement.excluded.format.in_(("long", "short", "live")), statement.excluded.format),
+        else_=VideoMetricSnapshot.format,
+    )
+    session.execute(statement.on_conflict_do_update(index_elements=[VideoMetricSnapshot.youtube_video_id, literal_column("coalesce(analytics_start_date, '')"), literal_column("coalesce(analytics_end_date, '')")], set_=update_values))
     snapshot = session.scalar(select(VideoMetricSnapshot).where(VideoMetricSnapshot.youtube_video_id == metric.youtube_video_id, VideoMetricSnapshot.analytics_start_date.is_(start_date) if start_date is None else VideoMetricSnapshot.analytics_start_date == start_date, VideoMetricSnapshot.analytics_end_date.is_(end_date) if end_date is None else VideoMetricSnapshot.analytics_end_date == end_date))
     session.flush()
     return snapshot

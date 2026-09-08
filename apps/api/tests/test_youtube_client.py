@@ -190,6 +190,27 @@ def test_fetch_video_metrics_maps_mocked_data_and_analytics_responses(tmp_path: 
     assert metrics.returning_viewers is None
 
 
+def test_fetch_video_views_uses_the_requested_read_only_period(tmp_path: Path):
+    class Reports:
+        def query(self, **kwargs):
+            assert kwargs == {
+                "ids": "channel==MINE",
+                "startDate": "2026-08-01",
+                "endDate": "2026-08-07",
+                "filters": "video==abc123",
+                "metrics": "views",
+            }
+            return _Request({"columnHeaders": [{"name": "views"}], "rows": [[314]]})
+
+    class Analytics:
+        def reports(self):
+            return Reports()
+
+    client = YouTubeClient(token_path=tmp_path / "token.json", data_api=_DataApi(), analytics_api=Analytics())
+
+    assert client.fetch_video_views("abc123", "2026-08-01", "2026-08-07") == 314
+
+
 def test_status_and_sync_report_configuration_required_before_any_channel_query(monkeypatch):
     """Without the single expected id, sync must not accept whichever account OAuth has."""
     from app.config import get_settings

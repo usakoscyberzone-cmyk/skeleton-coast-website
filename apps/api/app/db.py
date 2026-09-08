@@ -65,7 +65,7 @@ def upgrade_video_metrics_schema(bind) -> None:
     if bind.dialect.name != "sqlite":
         return
     additions = {
-        "analytics_start_date": "DATE", "analytics_end_date": "DATE", "title": "TEXT",
+        "analytics_start_date": "DATE", "analytics_end_date": "DATE", "channel_id": "VARCHAR(64)", "title": "TEXT",
         "published_at": "DATETIME", "duration_seconds": "INTEGER", "length_seconds": "INTEGER", "video_type": "VARCHAR(32)", "format": "VARCHAR(32)",
         "topic": "VARCHAR(64)", "average_percentage_viewed": "FLOAT",
         "thumbnail_wording": "VARCHAR(64)", "hook_type": "VARCHAR(64)",

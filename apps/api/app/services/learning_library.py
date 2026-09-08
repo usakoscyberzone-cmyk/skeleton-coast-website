@@ -202,6 +202,13 @@ def _fixed_7d_scope(video: ChannelVideo) -> tuple[str, str, str, str] | None:
     return (*scope, "first 7 days") if scope is not None else None
 
 
+def _long_form_7d_scope(video: ChannelVideo) -> tuple[str, str, str, str] | None:
+    scope = _normal_scope_without_period(video)
+    if scope is None or scope[1] != "long":
+        return None
+    return (*scope, "first 7 days")
+
+
 def _normal_scope_without_period(video: ChannelVideo) -> tuple[str, str, str] | None:
     topic = _recognized(video.topic, RECOGNIZED_TOPICS)
     format_name = _recognized(video.format, RECOGNIZED_FORMATS)
@@ -212,7 +219,12 @@ def _normal_scope_without_period(video: ChannelVideo) -> tuple[str, str, str] | 
 
 
 def _text(value: str | None) -> str | None:
-    return value.strip() if isinstance(value, str) and value.strip() else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip().casefold()
+    if normalized in {"unknown", "n/a", "na", "none", "null", "unavailable", "not available"}:
+        return None
+    return value.strip()
 
 
 def _short_duration(video: ChannelVideo) -> str | None:
@@ -245,5 +257,5 @@ _SPECS = (
     _PatternSpec("subscriber_conversion", "subscriber_conversion_rate", "subscriber conversion", "formats", lambda video: _recognized(video.format, RECOGNIZED_FORMATS), lambda video: video.subscriber_conversion_rate, _subscriber_scope),
     _PatternSpec("browse_suggested_response", "views_7d", "7-day views", "traffic-source groups", _traffic_group, lambda video: video.views_7d, _fixed_7d_scope),
     _PatternSpec("geography", "views", "views", "geographies", lambda video: _text(video.geography), lambda video: video.views, _normal_scope),
-    _PatternSpec("follow_up_performance", "views_7d", "7-day views", "follow-up types", _follow_up, lambda video: video.views_7d, _fixed_7d_scope),
+    _PatternSpec("follow_up_performance", "views_7d", "7-day views", "follow-up types", _follow_up, lambda video: video.views_7d, _long_form_7d_scope),
 )

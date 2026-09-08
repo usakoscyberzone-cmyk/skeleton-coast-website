@@ -138,6 +138,13 @@ class YouTubeClient:
         aggregate = self._query(api, **common, metrics=AGGREGATE_METRICS); traffic = self._query(api, **common, dimensions="insightTrafficSourceType", metrics="views"); values = aggregate[0] if aggregate else {}
         return RawVideoMetrics(video_id, values.get("views"), values.get("estimatedMinutesWatched"), values.get("averageViewDuration"), values.get("averageViewPercentage"), values.get("subscribersGained"), traffic_raw={row["insightTrafficSourceType"]: row["views"] for row in traffic})
 
+    def fetch_video_views(self, video_id: str, start_date: str, end_date: str) -> int | None:
+        rows = self._query(
+            self._analytics(), ids="channel==MINE", startDate=start_date, endDate=end_date,
+            filters=f"video=={video_id}", metrics="views",
+        )
+        return int(rows[0]["views"]) if rows and rows[0].get("views") is not None else None
+
     @contextmanager
     def token_guard(self):
         lock = self.token_path.with_name(self.token_path.name + ".lock")

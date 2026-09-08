@@ -1,5 +1,6 @@
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from contextlib import contextmanager
+from datetime import UTC, date, datetime, timedelta
 import math
 
 import pytest
@@ -11,6 +12,8 @@ from app.config import get_settings
 from app.db import Base, get_session, upgrade_video_metrics_schema
 from app.main import create_app
 from app.models import LearningPattern, VideoMetricSnapshot
+from app.routes import youtube as youtube_routes
+from app.services.youtube_client import ChannelIdentity, RawVideoMetrics, UploadedVideo
 from app.services.learning_library import (
     ChannelDataset,
     ChannelVideo,
@@ -94,6 +97,23 @@ def test_unknown_non_finite_and_incomplete_groups_never_create_confident_pattern
     assert extract_learning_patterns(ChannelDataset(channel_id="UC-skeleton", videos=videos)) == []
 
 
+@pytest.mark.parametrize(
+    ("field", "metric"),
+    [
+        ("thumbnail_wording", {"ctr": lambda n: .08 if n < 5 else .04}),
+        ("hook_type", {"average_percentage_viewed": lambda n: .60 if n < 5 else .40}),
+        ("geography", {"views": lambda n: 200 if n < 5 else 100}),
+    ],
+)
+def test_unknown_text_labels_are_not_treated_as_evidence_groups(field, metric):
+    videos = _videos(**{field: lambda n: "unknown" if n < 5 else "n/a", **metric})
+
+    assert not any(
+        pattern.pattern_type in {"thumbnail_wording", "hook_type", "geography"}
+        for pattern in extract_learning_patterns(ChannelDataset(channel_id="UC-skeleton", videos=videos))
+    )
+
+
 def test_metrics_from_different_or_unknown_analytics_periods_are_not_compared():
     videos = _videos(
         topic=lambda n: "Fishing" if n < 5 else "History",
@@ -120,6 +140,7 @@ def _snapshot(number: int) -> VideoMetricSnapshot:
     fishing = number < 5
     return VideoMetricSnapshot(
         youtube_video_id=f"video-{number}",
+        channel_id="UC-skeleton",
         captured_at=datetime(2026, 9, 8, tzinfo=UTC).replace(tzinfo=None),
         analytics_start_date=date(2026, 8, 1),
         analytics_end_date=date(2026, 8, 28),
@@ -252,8 +273,236 @@ def test_legacy_metric_schema_is_upgraded_with_optional_learning_dimensions(tmp_
             "CREATE TABLE video_metric_snapshots ("
             "id INTEGER PRIMARY KEY, youtube_video_id VARCHAR(32), captured_at DATETIME)"
         )
+        connection.exec_driver_sql(
+            "INSERT INTO video_metric_snapshots VALUES (1, 'legacy-video', '2026-09-01 00:00:00')"
+        )
 
     upgrade_video_metrics_schema(engine)
 
     columns = {column["name"] for column in inspect(engine).get_columns("video_metric_snapshots")}
-    assert {"thumbnail_wording", "hook_type", "geography", "is_follow_up"} <= columns
+    assert {"channel_id", "thumbnail_wording", "hook_type", "geography", "is_follow_up"} <= columns
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql("SELECT channel_id FROM video_metric_snapshots").all() == [(None,)]
+
+
+def test_follow_up_pattern_never_uses_short_form_evidence():
+    videos = _videos(
+        format="short",
+        length_seconds=30,
+        is_follow_up=lambda n: n < 5,
+        views_7d=lambda n: 200 if n < 5 else 100,
+    )
+
+    assert not any(
+        pattern.pattern_type == "follow_up_performance"
+        for pattern in extract_learning_patterns(ChannelDataset(channel_id="UC-skeleton", videos=videos))
+    )
+
+
+def test_latest_snapshot_prefers_newer_valid_reporting_period_over_capture_time(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXPECTED_YOUTUBE_CHANNEL_ID", "UC-skeleton")
+    get_settings.cache_clear()
+    engine = create_engine(f"sqlite:///{tmp_path / 'period-order.db'}")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    for number in range(10):
+        newest_period = _snapshot(number)
+        newest_period.id = number + 1
+        newest_period.captured_at = datetime(2026, 9, 1)
+        newest_period.analytics_end_date = date(2026, 8, 28)
+        older_period_captured_later = _snapshot(number)
+        older_period_captured_later.id = 100 + number
+        older_period_captured_later.captured_at = datetime(2026, 9, 8)
+        older_period_captured_later.analytics_start_date = date(2026, 7, 1)
+        older_period_captured_later.analytics_end_date = date(2026, 7, 28)
+        older_period_captured_later.topic = "Fishing"
+        older_period_captured_later.views = 100
+        session.add_all([newest_period, older_period_captured_later])
+    session.commit()
+    app = create_app()
+    app.dependency_overrides[get_session] = lambda: session
+
+    with TestClient(app) as client:
+        assert client.post("/learning/rebuild").json() == {"rebuilt": 1}
+        assert client.get("/learning/patterns").json()[0]["evidence"]["comparison_period"] == "2026-08-01/2026-08-28"
+
+    session.close()
+    get_settings.cache_clear()
+
+
+def test_learning_rebuild_filters_snapshot_provenance_and_legacy_rows_fail_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXPECTED_YOUTUBE_CHANNEL_ID", "UC-skeleton")
+    get_settings.cache_clear()
+
+
+def test_explicit_metrics_are_attached_only_to_the_latest_reporting_period(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXPECTED_YOUTUBE_CHANNEL_ID", "UC-skeleton")
+    get_settings.cache_clear()
+    engine = create_engine(f"sqlite:///{tmp_path / 'annotation-period.db'}")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    older = _snapshot(1)
+    older.analytics_start_date = date(2026, 7, 1)
+    older.analytics_end_date = date(2026, 7, 28)
+    newer = _snapshot(1)
+    newer.analytics_end_date = date(2026, 8, 28)
+    session.add_all([older, newer])
+    session.commit()
+    app = create_app()
+    app.dependency_overrides[get_session] = lambda: session
+
+    with TestClient(app) as client:
+        assert client.put("/learning/videos/video-1/metadata", json={"ctr": .08}).json() == {"updated": 1}
+
+    session.expire_all()
+    rows = list(session.scalars(select(VideoMetricSnapshot).order_by(VideoMetricSnapshot.analytics_end_date)))
+    assert [row.ctr for row in rows] == [None, .08]
+    session.close()
+    get_settings.cache_clear()
+    engine = create_engine(f"sqlite:///{tmp_path / 'channel-provenance.db'}")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    rows = [_snapshot(number) for number in range(10)]
+    for number, row in enumerate(rows):
+        row.channel_id = None if number < 5 else "UC-other"
+    session.add_all(rows)
+    session.commit()
+    app = create_app()
+    app.dependency_overrides[get_session] = lambda: session
+
+    with TestClient(app) as client:
+        assert client.post("/learning/rebuild").json() == {"rebuilt": 0}
+
+    session.close()
+    get_settings.cache_clear()
+
+
+class _SyncLearningClient:
+    token_path = None
+
+    @contextmanager
+    def token_guard(self):
+        yield
+
+    def ensure_token_unchanged(self):
+        return None
+
+    def get_authenticated_channel(self):
+        return ChannelIdentity("UC-skeleton", "Skeleton Coast Fishing Adventures & Tours", "UU-skeleton")
+
+    def list_uploaded_videos(self, _playlist_id):
+        published = datetime.now(UTC) - timedelta(days=30)
+        return [UploadedVideo(f"video-{number}", f"Video {number}", published, 600, "long") for number in range(20)]
+
+    def fetch_video_metrics(self, video_id, _start_date, _end_date):
+        number = int(video_id.rsplit("-", 1)[1])
+        better = number % 10 < 5
+        fishing = number < 10
+        views = (300 if better else 200) if fishing else (150 if better else 100)
+        return RawVideoMetrics(
+            video_id=video_id,
+            views=views,
+            average_percentage_viewed=60 if better else 40,
+            subscribers_gained=round(views * (.02 if better else .01)),
+            traffic_raw=(
+                {"BROWSE": 80, "RELATED_VIDEO": 10, "YT_SEARCH": 10}
+                if better else {"BROWSE": 1, "RELATED_VIDEO": 1, "YT_SEARCH": 98}
+            ),
+        )
+
+    def fetch_video_views(self, video_id, _start_date, _end_date):
+        number = int(video_id.rsplit("-", 1)[1])
+        better = number % 10 < 5
+        return (300 if better else 200) if number < 10 else (150 if better else 100)
+
+
+def test_real_sync_provenance_and_explicit_annotations_feed_learning_rebuild(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXPECTED_YOUTUBE_CHANNEL_ID", "UC-skeleton")
+    get_settings.cache_clear()
+    engine = create_engine(f"sqlite:///{tmp_path / 'sync-learning.db'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    monkeypatch.setattr(youtube_routes, "get_youtube_client", lambda: _SyncLearningClient())
+    app = create_app()
+    app.dependency_overrides[get_session] = lambda: session
+
+    with TestClient(app) as client:
+        assert client.post("/youtube/sync?start_date=2026-08-01&end_date=2026-09-08").status_code == 200
+        for number in range(20):
+            better = number % 10 < 5
+            response = client.put(f"/learning/videos/video-{number}/metadata", json={
+                "topic": "Fishing" if number < 10 else "History",
+                "thumbnail_wording": "mystery" if better else "plain",
+                "hook_type": "reveal" if better else "question",
+                "geography": "Namibia" if better else "South Africa",
+                "is_follow_up": better,
+                "ctr": .08 if better else .04,
+            })
+            assert response.status_code == 200
+        assert client.post("/youtube/sync?start_date=2026-08-01&end_date=2026-09-08").status_code == 200
+        rebuild = client.post("/learning/rebuild")
+        patterns = client.get("/learning/patterns").json()
+
+    assert rebuild.status_code == 200
+    assert {pattern["pattern_type"] for pattern in patterns} == {
+        "thumbnail_wording", "hook_type", "topic_performance",
+        "browse_suggested_response", "geography", "follow_up_performance",
+    }
+    snapshots = list(session.scalars(select(VideoMetricSnapshot)))
+    assert {row.channel_id for row in snapshots} == {"UC-skeleton"}
+    assert {row.views_7d for row in snapshots} == {100, 150, 200, 300}
+
+    with TestClient(app) as client:
+        for number in range(20):
+            assert client.put(
+                f"/learning/videos/video-{number}/metadata",
+                json={"format": "long" if number % 10 < 5 else "short"},
+            ).status_code == 200
+        assert client.post("/learning/rebuild").status_code == 200
+        assert "subscriber_conversion" in {
+            pattern["pattern_type"] for pattern in client.get("/learning/patterns").json()
+        }
+    session.close()
+    get_settings.cache_clear()
+
+
+class _ShortSyncLearningClient(_SyncLearningClient):
+    def list_uploaded_videos(self, _playlist_id):
+        published = datetime.now(UTC) - timedelta(days=30)
+        return [
+            UploadedVideo(f"short-{number}", f"Short {number}", published, 20 if number < 5 else 50, "unknown")
+            for number in range(10)
+        ]
+
+    def fetch_video_metrics(self, video_id, _start_date, _end_date):
+        number = int(video_id.rsplit("-", 1)[1])
+        return RawVideoMetrics(video_id=video_id, views=100, average_percentage_viewed=80 if number < 5 else 40)
+
+    def fetch_video_views(self, _video_id, _start_date, _end_date):
+        return 100
+
+
+def test_synced_durations_and_explicit_format_support_short_duration_learning(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXPECTED_YOUTUBE_CHANNEL_ID", "UC-skeleton")
+    get_settings.cache_clear()
+    engine = create_engine(f"sqlite:///{tmp_path / 'short-learning.db'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    monkeypatch.setattr(youtube_routes, "get_youtube_client", lambda: _ShortSyncLearningClient())
+    app = create_app()
+    app.dependency_overrides[get_session] = lambda: session
+
+    with TestClient(app) as client:
+        assert client.post("/youtube/sync?start_date=2026-08-01&end_date=2026-09-08").status_code == 200
+        for number in range(10):
+            assert client.put(
+                f"/learning/videos/short-{number}/metadata",
+                json={"topic": "Fishing", "format": "short"},
+            ).status_code == 200
+        assert client.post("/learning/rebuild").status_code == 200
+        assert "short_duration" in {
+            pattern["pattern_type"] for pattern in client.get("/learning/patterns").json()
+        }
+
+    session.close()
+    get_settings.cache_clear()

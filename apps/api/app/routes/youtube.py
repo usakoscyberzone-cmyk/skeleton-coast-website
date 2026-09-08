@@ -154,7 +154,15 @@ def sync_youtube(
             start_date = start_date or end_date - timedelta(days=28)
             pending = []
             for video in client.list_uploaded_videos(channel.uploads_playlist_id):
-                pending.append(normalize_metrics({**client.fetch_video_metrics(video.video_id, start_date.isoformat(), end_date.isoformat()).__dict__, "title": video.title, "published_at": video.published_at, "duration_seconds": video.duration_seconds, "video_type": video.video_type}))
+                seven_day_views = None
+                if video.published_at is not None and hasattr(client, "fetch_video_views"):
+                    first_day = video.published_at.date()
+                    seventh_day = first_day + timedelta(days=6)
+                    if end_date >= seventh_day:
+                        seven_day_views = client.fetch_video_views(
+                            video.video_id, first_day.isoformat(), seventh_day.isoformat()
+                        )
+                pending.append(normalize_metrics({**client.fetch_video_metrics(video.video_id, start_date.isoformat(), end_date.isoformat()).__dict__, "channel_id": channel.channel_id, "views_7d": seven_day_views, "title": video.title, "published_at": video.published_at, "duration_seconds": video.duration_seconds, "video_type": video.video_type}))
             begin_immediate_transaction(session)
             for metric in pending:
                 persist_metric_snapshot(session, metric, start_date=start_date, end_date=end_date)
