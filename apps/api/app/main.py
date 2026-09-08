@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from . import models
 from .db import Base, engine, upgrade_media_files_schema, upgrade_recommendations_schema, upgrade_short_plans_schema, upgrade_video_metrics_schema
@@ -12,6 +13,12 @@ from .routes.learning import router as learning_router
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Skeleton Coast Growth Dashboard")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_methods=["GET", "POST", "PUT"],
+        allow_headers=["Accept", "Content-Type"],
+    )
     app.include_router(health_router)
     app.include_router(projects_router)
     app.include_router(youtube_router)

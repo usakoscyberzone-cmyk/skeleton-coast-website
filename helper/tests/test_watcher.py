@@ -347,3 +347,38 @@ def test_main_prints_configuration_starts_watcher_and_stops_on_interrupt(
         "Watching for new projects...",
     ]
     assert calls == ["start", "stop"]
+
+
+def test_main_sync_once_calls_sync_without_starting_watcher(monkeypatch, capsys):
+    import skeleton_helper.__main__ as helper_main
+
+    calls: list[str] = []
+
+    class UnexpectedWatcher:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("one-shot synchronization must not start the watcher")
+
+    monkeypatch.setattr(
+        helper_main,
+        "get_settings",
+        lambda: SimpleNamespace(
+            master_project_folder=Path(r"I:\YouTube Projects"),
+            api_base_url="http://127.0.0.1:8000",
+        ),
+    )
+    monkeypatch.setattr(helper_main, "ProjectFolderWatcher", UnexpectedWatcher)
+    monkeypatch.setattr(
+        helper_main,
+        "sync_projects",
+        lambda url: calls.append(url) or {"projects": [{"id": 1}]},
+    )
+
+    result = helper_main.main(["--sync-once"])
+
+    assert result == 0
+    assert calls == ["http://127.0.0.1:8000"]
+    assert capsys.readouterr().out.splitlines() == [
+        r"Master folder: I:\YouTube Projects",
+        "API: http://127.0.0.1:8000",
+        "Manual project sync: PASS (1 project)",
+    ]
