@@ -3,6 +3,7 @@ import math
 import multiprocessing
 import os
 from pathlib import Path
+import json
 import subprocess
 import threading
 
@@ -586,7 +587,7 @@ def _api_payload() -> dict:
 def _asset_client(tmp_path: Path, monkeypatch):
     master = tmp_path / "YouTube Projects"
     project_path = master / "Project"
-    for folder in ("Metadata", "Shorts", "Analytics", "Captions"):
+    for folder in ("Metadata", "Shorts", "Analytics", "Captions", "Thumbnails"):
         (project_path / folder).mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("MASTER_PROJECT_FOLDER", str(master))
     get_settings.cache_clear()
@@ -600,3 +601,191 @@ def _asset_client(tmp_path: Path, monkeypatch):
     app = create_app()
     app.dependency_overrides[get_session] = lambda: session
     return TestClient(app), session, project, master
+
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\napproved-branding-bytes"
+
+
+def _packaging_payload() -> dict:
+    return {
+        "candidates": [
+            {
+                "label": "A",
+                "title": "What Washed Ashore on Namibia's Skeleton Coast?",
+                "thumbnail": {
+                    "aspect": "16:9",
+                    "file": "Thumbnails/thumbnail-A-16x9.png",
+                },
+                "hook": "A coastline mystery grounded in what the camera found.",
+                "seo_description": "An evidence-led look at a Skeleton Coast event.",
+                "tags": ["Skeleton Coast", "Namibia", "fishing"],
+                "pinned_comment": "What did you notice first?",
+                "chapters": "00:00 What we found\n01:15 The evidence",
+                "playlist": "Skeleton Coast field reports",
+                "next_video_cta": "Watch our latest Skeleton Coast fishing expedition.",
+                "scores": {
+                    "curiosity": 84,
+                    "clarity": 91,
+                    "search_relevance": 75,
+                    "audience_fit": 88,
+                    "uniqueness": 82,
+                    "title_thumbnail_complementarity": 90,
+                },
+                "rationale": "The title identifies the place while the image supplies the reveal.",
+            }
+        ]
+    }
+
+
+def test_save_thumbnail_variant_preserves_exact_png_bytes_and_fixed_name(tmp_path: Path):
+    project = tmp_path / "Project"
+    project.mkdir()
+    source = tmp_path / "candidate.png"
+    source.write_bytes(PNG_BYTES)
+
+    path = asset_generator.save_thumbnail_variant(project, source, "16:9", "A")
+
+    assert path == project / "Thumbnails" / "thumbnail-A-16x9.png"
+    assert path.read_bytes() == PNG_BYTES
+
+
+@pytest.mark.parametrize(
+    ("source_name", "source_bytes", "aspect", "label"),
+    [
+        ("candidate.jpg", PNG_BYTES, "16:9", "A"),
+        ("candidate.png", b"not-a-png", "16:9", "A"),
+        ("candidate.png", PNG_BYTES, "4:3", "A"),
+        ("candidate.png", PNG_BYTES, "16:9", "../A"),
+        ("candidate.png", PNG_BYTES, "16:9", "D"),
+    ],
+)
+def test_save_thumbnail_variant_rejects_unapproved_input(
+    tmp_path: Path, source_name: str, source_bytes: bytes, aspect: str, label: str
+):
+    project = tmp_path / "Project"
+    project.mkdir()
+    source = tmp_path / source_name
+    source.write_bytes(source_bytes)
+
+    with pytest.raises((ValueError, UnsafeAssetPathError)):
+        asset_generator.save_thumbnail_variant(project, source, aspect, label)
+
+
+def test_save_thumbnail_variant_rejects_overwrite_by_default(tmp_path: Path):
+    project = tmp_path / "Project"
+    project.mkdir()
+    source = tmp_path / "candidate.png"
+    source.write_bytes(PNG_BYTES)
+    asset_generator.save_thumbnail_variant(project, source, "9:16", "B")
+
+    with pytest.raises(AssetConflictError):
+        asset_generator.save_thumbnail_variant(project, source, "9:16", "B")
+
+
+def test_packaging_candidates_are_written_as_deterministic_project_json(tmp_path: Path):
+    project = tmp_path / "Project"
+    project.mkdir()
+    payload = _packaging_payload()
+
+    path = asset_generator.write_packaging_candidates(project, payload)
+
+    assert path == project / "Metadata" / "packaging-candidates.json"
+    expected = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    assert path.read_text(encoding="utf-8") == expected
+    assert asset_generator.read_packaging_candidates(project) == payload
+
+
+def test_empty_packaging_read_still_rejects_unsafe_project_root(tmp_path: Path, monkeypatch):
+    project = tmp_path / "Project"
+    project.mkdir()
+    monkeypatch.setattr(asset_generator, "_is_reparse_point", lambda path: Path(path) == project)
+
+    with pytest.raises(UnsafeAssetPathError):
+        asset_generator.read_packaging_candidates(project)
+
+
+def test_packaging_api_registers_png_and_saves_complete_advisory_candidate(
+    tmp_path: Path, monkeypatch
+):
+    client, session, project, _master = _asset_client(tmp_path, monkeypatch)
+    source = tmp_path / "approved.png"
+    source.write_bytes(PNG_BYTES)
+
+    thumbnail = client.post(
+        f"/projects/{project.id}/assets/thumbnails",
+        json={"source_png": str(source), "aspect": "16:9", "label": "A"},
+    )
+    packaging = client.put(
+        f"/projects/{project.id}/assets/packaging",
+        json=_packaging_payload(),
+    )
+    loaded = client.get(f"/projects/{project.id}/assets/packaging")
+
+    assert thumbnail.status_code == 201
+    assert thumbnail.json() == {"file": "Thumbnails/thumbnail-A-16x9.png"}
+    assert packaging.status_code == 201
+    assert packaging.json() == {"file": "Metadata/packaging-candidates.json"}
+    assert loaded.status_code == 200
+    assert loaded.json() == _packaging_payload()
+    assert "advisory" not in json.dumps(loaded.json()).lower()  # scores are data, UI supplies label
+    session.close()
+
+
+def test_packaging_api_explicitly_updates_json_for_additional_candidate(
+    tmp_path: Path, monkeypatch
+):
+    client, session, project, _master = _asset_client(tmp_path, monkeypatch)
+    for label in ("A", "B"):
+        source = tmp_path / f"{label}.png"
+        source.write_bytes(PNG_BYTES + label.encode())
+        assert client.post(
+            f"/projects/{project.id}/assets/thumbnails",
+            json={"source_png": str(source), "aspect": "16:9", "label": label},
+        ).status_code == 201
+    first = _packaging_payload()
+    assert client.put(f"/projects/{project.id}/assets/packaging", json=first).status_code == 201
+    second = json.loads(json.dumps(first["candidates"][0]))
+    second["label"] = "B"
+    second["title"] = "A second packaging direction"
+    second["thumbnail"]["file"] = "Thumbnails/thumbnail-B-16x9.png"
+
+    response = client.put(
+        f"/projects/{project.id}/assets/packaging",
+        json={"candidates": [first["candidates"][0], second], "overwrite": True},
+    )
+
+    assert response.status_code == 201
+    assert [candidate["label"] for candidate in client.get(
+        f"/projects/{project.id}/assets/packaging"
+    ).json()["candidates"]] == ["A", "B"]
+    session.close()
+
+
+def test_packaging_api_rejects_missing_thumbnail_wrong_png_and_overwrite(
+    tmp_path: Path, monkeypatch
+):
+    client, session, project, _master = _asset_client(tmp_path, monkeypatch)
+    missing = client.post(
+        f"/projects/{project.id}/assets/thumbnails",
+        json={"source_png": str(tmp_path / "missing.png"), "aspect": "16:9", "label": "A"},
+    )
+    bad = tmp_path / "bad.png"
+    bad.write_bytes(b"not png")
+    wrong = client.post(
+        f"/projects/{project.id}/assets/thumbnails",
+        json={"source_png": str(bad), "aspect": "16:9", "label": "A"},
+    )
+    approved = tmp_path / "approved.png"
+    approved.write_bytes(PNG_BYTES)
+    assert client.post(
+        f"/projects/{project.id}/assets/thumbnails",
+        json={"source_png": str(approved), "aspect": "16:9", "label": "A"},
+    ).status_code == 201
+    first = client.put(f"/projects/{project.id}/assets/packaging", json=_packaging_payload())
+    conflict = client.put(f"/projects/{project.id}/assets/packaging", json=_packaging_payload())
+
+    assert missing.status_code == 422
+    assert wrong.status_code == 422
+    assert first.status_code == 201
+    assert conflict.status_code == 409
+    session.close()

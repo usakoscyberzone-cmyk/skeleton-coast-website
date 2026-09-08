@@ -5,6 +5,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import hashlib
 import io
+import json
 import math
 import os
 from pathlib import Path
@@ -12,7 +13,7 @@ import re
 import secrets
 import tempfile
 import threading
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Literal, Mapping, Any
 
 
 class AssetGenerationError(Exception):
@@ -115,6 +116,9 @@ CUT_COLUMNS = (
     "on_screen_text", "cta", "status", "strategic_role",
 )
 _TRACK_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_THUMBNAIL_LABELS = frozenset({"A", "B", "C"})
+_THUMBNAIL_ASPECTS = {"16:9": "16x9", "9:16": "9x16"}
 _PROJECT_LOCKS: dict[str, threading.RLock] = {}
 _PROJECT_LOCKS_GUARD = threading.Lock()
 
@@ -216,16 +220,20 @@ def _is_reparse_point(path: Path) -> bool:
         return False
 
 
-def _validate_targets(project_path: Path, targets: Iterable[Path]) -> None:
+def _validate_project_root(project_path: Path) -> Path:
     if not project_path.is_absolute() or not project_path.is_dir() or _is_reparse_point(project_path):
         raise UnsafeAssetPathError("Unsafe project directory")
     try:
-        resolved_project = project_path.resolve(strict=True)
+        return project_path.resolve(strict=True)
     except OSError as exc:
         raise UnsafeAssetPathError("Unsafe project directory") from exc
+
+
+def _validate_targets(project_path: Path, targets: Iterable[Path]) -> None:
+    resolved_project = _validate_project_root(project_path)
     for target in targets:
         output_dir = target.parent
-        if output_dir.name not in {"Metadata", "Shorts", "Analytics", "Captions"}:
+        if output_dir.name not in {"Metadata", "Shorts", "Analytics", "Captions", "Thumbnails"}:
             raise UnsafeAssetPathError("Invalid asset output directory")
         if output_dir.parent != project_path:
             raise UnsafeAssetPathError("Asset target is outside the project")
@@ -311,13 +319,15 @@ def _hold_asset_directories(
         yield
 
 
-def _stage_file(target: Path, content: str) -> Path:
+def _stage_file(target: Path, content: str | bytes) -> Path:
     descriptor, temporary_name = tempfile.mkstemp(
         dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
     )
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+        mode = "wb" if isinstance(content, bytes) else "w"
+        kwargs = {} if isinstance(content, bytes) else {"encoding": "utf-8", "newline": "\n"}
+        with os.fdopen(descriptor, mode, **kwargs) as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
@@ -375,7 +385,7 @@ def _interprocess_project_lock(project_path: Path) -> Iterator[None]:
         close_handle(handle)
 
 
-def _commit_files(files: dict[Path, str], *, overwrite: bool) -> list[Path]:
+def _commit_files(files: dict[Path, str | bytes], *, overwrite: bool) -> list[Path]:
     if any(path.exists() for path in files) and not overwrite:
         raise AssetConflictError("One or more generated assets already exist")
     originals = {path: path.read_bytes() if path.exists() else None for path in files}
@@ -415,13 +425,13 @@ def _commit_files(files: dict[Path, str], *, overwrite: bool) -> list[Path]:
             rollback.unlink(missing_ok=True)
 
 
-def _write_files_locked(files: dict[Path, str], *, overwrite: bool) -> list[Path]:
+def _write_files_locked(files: dict[Path, str | bytes], *, overwrite: bool) -> list[Path]:
     project_path = next(iter(files)).parents[1]
     with _hold_asset_directories(project_path, files):
         return _commit_files(files, overwrite=overwrite)
 
 
-def _write_files(files: dict[Path, str], *, overwrite: bool = False) -> list[Path]:
+def _write_files(files: dict[Path, str | bytes], *, overwrite: bool = False) -> list[Path]:
     project_path = next(iter(files)).parents[1]
     with _project_lock(project_path):
         with _interprocess_project_lock(project_path):
@@ -470,3 +480,106 @@ def generate_asset_pack(
             raise ValueError("caption track names must be unique")
         files.update(rendered)
     return _write_files(files, overwrite=overwrite)
+
+
+def _validate_source_png(source_png: Path) -> bytes:
+    if not source_png.is_absolute() or source_png.suffix.lower() != ".png":
+        raise ValueError("source_png must be an absolute PNG path")
+    if not source_png.is_file() or _is_reparse_point(source_png):
+        raise ValueError("source_png must be a regular PNG file")
+    current = source_png.parent
+    while current != current.parent:
+        if _is_reparse_point(current):
+            raise UnsafeAssetPathError("source_png may not traverse a reparse point")
+        current = current.parent
+    before = source_png.stat()
+    with source_png.open("rb") as handle:
+        opened = os.fstat(handle.fileno())
+        content = handle.read()
+    after = source_png.stat()
+    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    identity_opened = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    if identity_before != identity_opened or identity_opened != identity_after:
+        raise UnsafeAssetPathError("source_png changed while it was read")
+    if not content.startswith(_PNG_SIGNATURE):
+        raise ValueError("source_png is not a PNG file")
+    return content
+
+
+def save_thumbnail_variant(
+    project_path: Path,
+    source_png: Path,
+    aspect: Literal["16:9", "9:16"],
+    label: str,
+) -> Path:
+    """Copy one approved PNG byte-for-byte into a fixed project-local target."""
+    if aspect not in _THUMBNAIL_ASPECTS:
+        raise ValueError("aspect must be 16:9 or 9:16")
+    if label not in _THUMBNAIL_LABELS:
+        raise ValueError("label must be A, B, or C")
+    content = _validate_source_png(source_png)
+    target = project_path / "Thumbnails" / f"thumbnail-{label}-{_THUMBNAIL_ASPECTS[aspect]}.png"
+    return _write_files({target: content})[0]
+
+
+def _validate_packaging_document(document: Mapping[str, Any]) -> None:
+    candidates = document.get("candidates")
+    if not isinstance(candidates, list):
+        raise ValueError("packaging candidates must be a list")
+    labels: set[str] = set()
+    score_names = {
+        "curiosity", "clarity", "search_relevance", "audience_fit", "uniqueness",
+        "title_thumbnail_complementarity",
+    }
+    required_text = {
+        "title", "hook", "seo_description", "pinned_comment", "chapters", "playlist",
+        "next_video_cta", "rationale",
+    }
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            raise ValueError("invalid packaging candidate")
+        label = candidate.get("label")
+        if label not in _THUMBNAIL_LABELS or label in labels:
+            raise ValueError("candidate labels must be unique A, B, or C")
+        labels.add(label)
+        if any(not isinstance(candidate.get(field), str) or not candidate[field].strip() for field in required_text):
+            raise ValueError("packaging candidate text fields must not be blank")
+        tags = candidate.get("tags")
+        if not isinstance(tags, list) or not tags or any(not isinstance(tag, str) or not tag.strip() for tag in tags):
+            raise ValueError("packaging candidate tags must not be blank")
+        thumbnail = candidate.get("thumbnail")
+        if not isinstance(thumbnail, Mapping) or thumbnail.get("aspect") not in _THUMBNAIL_ASPECTS:
+            raise ValueError("invalid packaging thumbnail")
+        expected_file = f"Thumbnails/thumbnail-{label}-{_THUMBNAIL_ASPECTS[thumbnail['aspect']]}.png"
+        if thumbnail.get("file") != expected_file:
+            raise UnsafeAssetPathError("packaging thumbnail must use its fixed project path")
+        scores = candidate.get("scores")
+        if not isinstance(scores, Mapping) or set(scores) != score_names:
+            raise ValueError("all six advisory scores are required")
+        if any(type(score) is not int or not 0 <= score <= 100 for score in scores.values()):
+            raise ValueError("advisory scores must be integers from 0 to 100")
+
+
+def write_packaging_candidates(
+    project_path: Path, document: Mapping[str, Any], *, overwrite: bool = False
+) -> Path:
+    _validate_packaging_document(document)
+    rendered = json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    target = project_path / "Metadata" / "packaging-candidates.json"
+    return _write_files({target: rendered}, overwrite=overwrite)[0]
+
+
+def read_packaging_candidates(project_path: Path) -> dict[str, Any]:
+    _validate_project_root(project_path)
+    target = project_path / "Metadata" / "packaging-candidates.json"
+    if not target.exists():
+        return {"candidates": []}
+    with _project_lock(project_path):
+        with _interprocess_project_lock(project_path):
+            with _hold_asset_directories(project_path, (target,)):
+                document = json.loads(target.read_text(encoding="utf-8"))
+                if not isinstance(document, dict):
+                    raise ValueError("invalid packaging candidate file")
+                _validate_packaging_document(document)
+                return document

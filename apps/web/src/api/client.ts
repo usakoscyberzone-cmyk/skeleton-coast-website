@@ -1,4 +1,4 @@
-import type { DashboardSummary, LearningPattern, MediaFile, ProjectDetail, ProjectSummary, Recommendation, RetentionData, ShortPlan, YouTubeStatus } from "../types";
+import type { DashboardSummary, LearningPattern, MediaFile, PackagingCandidate, PackagingDocument, PackagingLabel, ProjectDetail, ProjectSummary, Recommendation, RetentionData, ShortPlan, ThumbnailAspect, YouTubeStatus } from "../types";
 
 const baseUrl = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -49,9 +49,33 @@ async function getJson<T>(path: string, validate: (value: unknown) => T): Promis
   return validate(await response.json());
 }
 
+async function sendJson<T>(path: string, method: "POST" | "PUT", body: unknown, validate: (value: unknown) => T): Promise<T> {
+  const response = await fetch(`${baseUrl}${path}`, { method, headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`;
+    try { message = (await response.json()).detail ?? message; } catch { /* use status message */ }
+    throw new ApiError(response.status, message);
+  }
+  return validate(await response.json());
+}
+
+const scoreFields = ["curiosity", "clarity", "search_relevance", "audience_fit", "uniqueness", "title_thumbnail_complementarity"] as const;
+function packagingCandidate(value: unknown): PackagingCandidate {
+  const textFields = ["title", "hook", "seo_description", "pinned_comment", "chapters", "playlist", "next_video_cta", "rationale"] as const;
+  if (!isRecord(value) || !["A", "B", "C"].includes(String(value.label)) || textFields.some((field) => typeof value[field] !== "string" || !(value[field] as string).trim()) || !Array.isArray(value.tags) || value.tags.length === 0 || value.tags.some((tag) => typeof tag !== "string" || !tag.trim()) || !isRecord(value.thumbnail) || !["16:9", "9:16"].includes(String(value.thumbnail.aspect)) || typeof value.thumbnail.file !== "string" || !isRecord(value.scores)) return invalid("/projects/:id/assets/packaging");
+  const scores = value.scores;
+  if (scoreFields.some((field) => !Number.isInteger(scores[field]) || (scores[field] as number) < 0 || (scores[field] as number) > 100)) return invalid("/projects/:id/assets/packaging");
+  const suffix = value.thumbnail.aspect === "16:9" ? "16x9" : "9x16";
+  if (value.thumbnail.file !== `Thumbnails/thumbnail-${value.label}-${suffix}.png`) return invalid("/projects/:id/assets/packaging");
+  return value as unknown as PackagingCandidate;
+}
+
 export function getProjects(): Promise<ProjectSummary[]> { return getJson("/projects", (value) => Array.isArray(value) ? value.map((item) => project(item, "/projects")) : invalid("/projects")); }
 export function getProject(id: string | number): Promise<ProjectDetail> { return getJson(`/projects/${id}`, (value) => { const base = project(value, `/projects/${id}`); if (!isRecord(value) || !Array.isArray(value.media_files)) return invalid(`/projects/${id}`); return { ...base, media_files: value.media_files.map((item) => mediaFile(item, `/projects/${id}`)) }; }); }
 export function getShortPlans(projectId: string | number): Promise<ShortPlan[]> { return getJson(`/projects/${projectId}/shorts`, (value) => Array.isArray(value) ? value.map((item) => shortPlan(item, `/projects/${projectId}/shorts`)) : invalid(`/projects/${projectId}/shorts`)); }
+export function getPackagingCandidates(projectId: string | number): Promise<PackagingDocument> { return getJson(`/projects/${projectId}/assets/packaging`, (value) => { if (!isRecord(value) || !Array.isArray(value.candidates) || value.candidates.length > 3) return invalid("/projects/:id/assets/packaging"); const candidates = value.candidates.map(packagingCandidate); if (new Set(candidates.map((candidate) => candidate.label)).size !== candidates.length) return invalid("/projects/:id/assets/packaging"); return { candidates }; }); }
+export function registerThumbnail(projectId: string | number, source_png: string, aspect: ThumbnailAspect, label: PackagingLabel): Promise<{ file: string }> { return sendJson(`/projects/${projectId}/assets/thumbnails`, "POST", { source_png, aspect, label }, (value) => isRecord(value) && typeof value.file === "string" ? { file: value.file } : invalid("/projects/:id/assets/thumbnails")); }
+export function savePackagingCandidates(projectId: string | number, document: PackagingDocument, overwrite = false): Promise<{ file: string }> { return sendJson(`/projects/${projectId}/assets/packaging`, "PUT", { ...document, overwrite }, (value) => isRecord(value) && typeof value.file === "string" ? { file: value.file } : invalid("/projects/:id/assets/packaging")); }
 export function getDashboardSummary(): Promise<DashboardSummary> { return getJson("/analytics/summary", dashboard); }
 export function getRetention(videoId: string): Promise<RetentionData> { return getJson(`/analytics/videos/${encodeURIComponent(videoId)}/retention`, (value) => isRecord(value) && typeof value.video_id === "string" && (value.retention === null || (Array.isArray(value.retention) && value.retention.every((point) => isRecord(point) && typeof point.elapsed_ratio === "number" && typeof point.audience_retention === "number"))) ? value as unknown as RetentionData : invalid("/analytics/videos/:id/retention")); }
 export async function getLearningPatterns(): Promise<LearningPattern[]> {

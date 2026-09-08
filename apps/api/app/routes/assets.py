@@ -24,6 +24,9 @@ from ..services.asset_generator import (
     UnsafeAssetPathError,
     _is_reparse_point,
     generate_asset_pack,
+    read_packaging_candidates,
+    save_thumbnail_variant,
+    write_packaging_candidates,
 )
 
 
@@ -135,6 +138,80 @@ class AssetGenerationPayload(BaseModel):
     overwrite: bool = False
 
 
+class ThumbnailPayload(BaseModel):
+    source_png: str = Field(min_length=1)
+    aspect: Literal["16:9", "9:16"]
+    label: Literal["A", "B", "C"]
+
+
+class ThumbnailReferencePayload(BaseModel):
+    aspect: Literal["16:9", "9:16"]
+    file: str = Field(min_length=1)
+
+
+class PackagingScoresPayload(BaseModel):
+    curiosity: int = Field(ge=0, le=100)
+    clarity: int = Field(ge=0, le=100)
+    search_relevance: int = Field(ge=0, le=100)
+    audience_fit: int = Field(ge=0, le=100)
+    uniqueness: int = Field(ge=0, le=100)
+    title_thumbnail_complementarity: int = Field(ge=0, le=100)
+
+
+class PackagingCandidatePayload(BaseModel):
+    label: Literal["A", "B", "C"]
+    title: str = Field(min_length=1)
+    thumbnail: ThumbnailReferencePayload
+    hook: str = Field(min_length=1)
+    seo_description: str = Field(min_length=1)
+    tags: list[str] = Field(min_length=1)
+    pinned_comment: str = Field(min_length=1)
+    chapters: str = Field(min_length=1)
+    playlist: str = Field(min_length=1)
+    next_video_cta: str = Field(min_length=1)
+    scores: PackagingScoresPayload
+    rationale: str = Field(min_length=1)
+
+    @field_validator(
+        "title", "hook", "seo_description", "pinned_comment", "chapters", "playlist",
+        "next_video_cta", "rationale",
+    )
+    @classmethod
+    def candidate_text_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("candidate text must not be blank")
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def candidate_tags_are_not_blank(cls, value: list[str]) -> list[str]:
+        if any(not tag.strip() for tag in value):
+            raise ValueError("candidate tags must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def thumbnail_matches_candidate(self):
+        suffix = "16x9" if self.thumbnail.aspect == "16:9" else "9x16"
+        if self.thumbnail.file != f"Thumbnails/thumbnail-{self.label}-{suffix}.png":
+            raise ValueError("thumbnail file must match its label and aspect")
+        return self
+
+
+class PackagingPayload(BaseModel):
+    candidates: list[PackagingCandidatePayload] = Field(max_length=3)
+
+    @model_validator(mode="after")
+    def unique_labels(self):
+        labels = [candidate.label for candidate in self.candidates]
+        if len(labels) != len(set(labels)):
+            raise ValueError("candidate labels must be unique")
+        return self
+
+
+class PackagingSavePayload(PackagingPayload):
+    overwrite: bool = False
+
+
 def _registered_project_path(project: Project) -> Path:
     master = Path(get_settings().master_project_folder)
     registered = Path(project.path)
@@ -197,3 +274,75 @@ def generate_assets(
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Asset generation failed") from exc
     return {"files": [path.relative_to(project_path).as_posix() for path in paths]}
+
+
+def _project_or_404(project_id: int, session: Session) -> Project:
+    project = session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+@router.post("/{project_id}/assets/thumbnails", status_code=201)
+def register_thumbnail(
+    project_id: int,
+    payload: ThumbnailPayload,
+    session: Session = Depends(get_session),
+) -> dict[str, str]:
+    project = _project_or_404(project_id, session)
+    try:
+        project_path = _registered_project_path(project)
+        path = save_thumbnail_variant(
+            project_path, Path(payload.source_png), payload.aspect, payload.label
+        )
+    except AssetConflictError as exc:
+        raise HTTPException(status_code=409, detail="Thumbnail variant already exists") from exc
+    except UnsafeAssetPathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Thumbnail registration failed") from exc
+    return {"file": path.relative_to(project_path).as_posix()}
+
+
+@router.put("/{project_id}/assets/packaging", status_code=201)
+def save_packaging(
+    project_id: int,
+    payload: PackagingSavePayload,
+    session: Session = Depends(get_session),
+) -> dict[str, str]:
+    project = _project_or_404(project_id, session)
+    try:
+        project_path = _registered_project_path(project)
+        document = PackagingPayload(candidates=payload.candidates).model_dump()
+        for candidate in payload.candidates:
+            thumbnail = project_path / Path(candidate.thumbnail.file)
+            if not thumbnail.is_file() or _is_reparse_point(thumbnail):
+                raise ValueError(f"Thumbnail {candidate.label} is not registered")
+        path = write_packaging_candidates(project_path, document, overwrite=payload.overwrite)
+    except AssetConflictError as exc:
+        raise HTTPException(status_code=409, detail="Packaging candidates already exist") from exc
+    except UnsafeAssetPathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Packaging save failed") from exc
+    return {"file": path.relative_to(project_path).as_posix()}
+
+
+@router.get("/{project_id}/assets/packaging", response_model=PackagingPayload)
+def get_packaging(
+    project_id: int,
+    session: Session = Depends(get_session),
+) -> dict:
+    project = _project_or_404(project_id, session)
+    try:
+        project_path = _registered_project_path(project)
+        document = read_packaging_candidates(project_path)
+        return PackagingPayload.model_validate(document).model_dump()
+    except UnsafeAssetPathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=500, detail="Packaging candidates could not be read") from exc

@@ -39,3 +39,17 @@ export interface Recommendation {
 export interface YouTubeStatus { status: string; detail?: string; channel_title?: string; channel_id?: string; }
 export interface RetentionData { video_id: string; retention: RetentionPoint[] | null; }
 export interface LearningPattern { id: number; topic: string; pattern_type: string; summary: string; confidence: string; evidence_count: number; }
+export type PackagingLabel = "A" | "B" | "C";
+export type ThumbnailAspect = "16:9" | "9:16";
+export interface PackagingScores {
+  curiosity: number; clarity: number; search_relevance: number; audience_fit: number;
+  uniqueness: number; title_thumbnail_complementarity: number;
+}
+export interface PackagingCandidate {
+  label: PackagingLabel; title: string;
+  thumbnail: { aspect: ThumbnailAspect; file: string };
+  hook: string; seo_description: string; tags: string[]; pinned_comment: string;
+  chapters: string; playlist: string; next_video_cta: string;
+  scores: PackagingScores; rationale: string;
+}
+export interface PackagingDocument { candidates: PackagingCandidate[]; }
