@@ -1,7 +1,9 @@
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import math
 import os
 from pathlib import Path
 import subprocess
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -227,6 +229,66 @@ def test_writer_rolls_back_all_targets_when_atomic_replace_fails(tmp_path: Path,
     assert list((project / "Metadata").iterdir()) == []
 
 
+def test_writer_cleanup_preserves_rollback_files_it_did_not_create(
+    tmp_path: Path, monkeypatch
+):
+    project = tmp_path / "Project"
+    metadata = project / "Metadata"
+    metadata.mkdir(parents=True)
+    foreign_rollback = metadata / ".youtube.txt.foreign.rollback"
+    foreign_rollback.write_text("another writer", encoding="utf-8")
+    monkeypatch.setattr(
+        asset_generator.os,
+        "replace",
+        lambda *_: (_ for _ in ()).throw(OSError("disk failure")),
+    )
+
+    with pytest.raises(OSError, match="disk failure"):
+        write_metadata_pack(project, _metadata_pack())
+
+    assert foreign_rollback.read_text(encoding="utf-8") == "another writer"
+
+
+def test_concurrent_default_writers_serialize_then_second_conflicts(
+    tmp_path: Path, monkeypatch
+):
+    project = tmp_path / "Project"
+    (project / "Metadata").mkdir(parents=True)
+    real_stage_file = asset_generator._stage_file
+    first_writer_ident: list[int] = []
+    first_writer_in_stage = threading.Event()
+    release_first = threading.Event()
+
+    def pause_first_writer(target: Path, content: str) -> Path:
+        if threading.get_ident() == first_writer_ident[0] and not first_writer_in_stage.is_set():
+            first_writer_in_stage.set()
+            assert release_first.wait(timeout=5)
+        return real_stage_file(target, content)
+
+    def first_write():
+        first_writer_ident.append(threading.get_ident())
+        return write_metadata_pack(project, _metadata_pack())
+
+    monkeypatch.setattr(asset_generator, "_stage_file", pause_first_writer)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(first_write)
+        assert first_writer_in_stage.wait(timeout=5)
+        second = pool.submit(write_metadata_pack, project, _metadata_pack())
+        second_finished_while_first_paused = False
+        try:
+            second.result(timeout=0.5)
+            second_finished_while_first_paused = True
+        except FutureTimeoutError:
+            pass
+        finally:
+            release_first.set()
+
+        assert not second_finished_while_first_paused
+        assert len(first.result(timeout=5)) == 6
+        with pytest.raises(AssetConflictError):
+            second.result(timeout=5)
+
+
 def test_writer_rejects_reparse_output_directory(tmp_path: Path, monkeypatch):
     project = tmp_path / "Project"
     metadata = project / "Metadata"
@@ -263,6 +325,52 @@ def test_writer_rejects_real_windows_junction_output_before_writing(tmp_path: Pa
         assert list(outside.iterdir()) == []
     finally:
         os.rmdir(junction)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
+def test_writer_holds_output_directory_against_junction_swap_during_transaction(
+    tmp_path: Path, monkeypatch
+):
+    project = tmp_path / "Project"
+    metadata = project / "Metadata"
+    metadata.mkdir(parents=True)
+    parked = project / "Metadata-parked"
+    outside = tmp_path / "Outside"
+    outside.mkdir()
+    real_stage_file = asset_generator._stage_file
+    swap_attempted = False
+    swap_blocked = False
+
+    def attempt_swap_then_stage(target: Path, content: str) -> Path:
+        nonlocal swap_attempted, swap_blocked
+        if target.parent == metadata and not swap_attempted:
+            swap_attempted = True
+            try:
+                metadata.rename(parked)
+            except OSError:
+                swap_blocked = True
+            else:
+                result = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(metadata), str(outside)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                assert result.returncode == 0, result.stderr
+        return real_stage_file(target, content)
+
+    monkeypatch.setattr(asset_generator, "_stage_file", attempt_swap_then_stage)
+    try:
+        write_metadata_pack(project, _metadata_pack())
+        assert swap_attempted
+        assert swap_blocked
+        assert list(outside.iterdir()) == []
+        assert (metadata / "youtube.txt").is_file()
+    finally:
+        if asset_generator._is_reparse_point(metadata):
+            os.rmdir(metadata)
+        if parked.exists():
+            parked.rename(metadata)
 
 
 def test_asset_api_writes_complete_advisory_pack_and_is_deterministic(tmp_path: Path, monkeypatch):

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import csv
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import io
 import math
 import os
 from pathlib import Path
 import re
+import secrets
 import tempfile
-from typing import Iterable
+import threading
+from typing import Iterable, Iterator
 
 
 class AssetGenerationError(Exception):
@@ -111,6 +114,8 @@ CUT_COLUMNS = (
     "on_screen_text", "cta", "status", "strategic_role",
 )
 _TRACK_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_PROJECT_LOCKS: dict[str, threading.RLock] = {}
+_PROJECT_LOCKS_GUARD = threading.Lock()
 
 
 def _normalize_newlines(value: str) -> str:
@@ -233,6 +238,78 @@ def _validate_targets(project_path: Path, targets: Iterable[Path]) -> None:
             raise UnsafeAssetPathError("Unsafe asset target")
 
 
+@contextmanager
+def _hold_directory_stable(path: Path) -> Iterator[None]:
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        read_write_delete = 0x80000000 | 0x40000000 | 0x00010000
+        share_read_write = 0x00000001 | 0x00000002
+        create_new = 1
+        hidden_delete_on_close = 0x00000002 | 0x04000000
+        handle = ctypes.c_void_p(-1).value
+        for _ in range(10):
+            guard = path / f".asset-generation-{secrets.token_hex(16)}.guard"
+            handle = create_file(
+                str(guard),
+                read_write_delete,
+                share_read_write,
+                None,
+                create_new,
+                hidden_delete_on_close,
+                None,
+            )
+            if handle != ctypes.c_void_p(-1).value:
+                break
+            if ctypes.get_last_error() not in {80, 183}:
+                raise ctypes.WinError(ctypes.get_last_error())
+        if handle == ctypes.c_void_p(-1).value:
+            raise OSError("Could not reserve a directory guard")
+        try:
+            yield
+        finally:
+            close_handle(handle)
+        return
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        yield
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def _hold_asset_directories(
+    project_path: Path, targets: Iterable[Path]
+) -> Iterator[None]:
+    targets = tuple(targets)
+    _validate_targets(project_path, targets)
+    output_directories = sorted({target.parent for target in targets}, key=str)
+    with ExitStack() as stack:
+        stack.enter_context(_hold_directory_stable(project_path))
+        for output_dir in output_directories:
+            stack.enter_context(_hold_directory_stable(output_dir))
+        _validate_targets(project_path, targets)
+        yield
+
+
 def _stage_file(target: Path, content: str) -> Path:
     descriptor, temporary_name = tempfile.mkstemp(
         dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
@@ -249,13 +326,19 @@ def _stage_file(target: Path, content: str) -> Path:
     return temporary
 
 
-def _write_files(files: dict[Path, str], *, overwrite: bool = False) -> list[Path]:
-    _validate_targets(next(iter(files)).parents[1], files)
+def _project_lock(project_path: Path) -> threading.RLock:
+    key = os.path.normcase(str(project_path.resolve(strict=False)))
+    with _PROJECT_LOCKS_GUARD:
+        return _PROJECT_LOCKS.setdefault(key, threading.RLock())
+
+
+def _commit_files(files: dict[Path, str], *, overwrite: bool) -> list[Path]:
     if any(path.exists() for path in files) and not overwrite:
         raise AssetConflictError("One or more generated assets already exist")
     originals = {path: path.read_bytes() if path.exists() else None for path in files}
     staged: list[tuple[Path, Path]] = []
     replaced: list[Path] = []
+    rollback_artifacts: list[Path] = []
     try:
         staged = [(_stage_file(target, content), target) for target, content in files.items()]
         for temporary, target in staged:
@@ -273,6 +356,7 @@ def _write_files(files: dict[Path, str], *, overwrite: bool = False) -> list[Pat
                         dir=target.parent, prefix=f".{target.name}.", suffix=".rollback"
                     )
                     rollback = Path(rollback_name)
+                    rollback_artifacts.append(rollback)
                     with os.fdopen(descriptor, "wb") as handle:
                         handle.write(original)
                         handle.flush()
@@ -284,9 +368,20 @@ def _write_files(files: dict[Path, str], *, overwrite: bool = False) -> list[Pat
     finally:
         for temporary, _ in staged:
             temporary.unlink(missing_ok=True)
-        for target in files:
-            for rollback in target.parent.glob(f".{target.name}.*.rollback"):
-                rollback.unlink(missing_ok=True)
+        for rollback in rollback_artifacts:
+            rollback.unlink(missing_ok=True)
+
+
+def _write_files_locked(files: dict[Path, str], *, overwrite: bool) -> list[Path]:
+    project_path = next(iter(files)).parents[1]
+    with _hold_asset_directories(project_path, files):
+        return _commit_files(files, overwrite=overwrite)
+
+
+def _write_files(files: dict[Path, str], *, overwrite: bool = False) -> list[Path]:
+    project_path = next(iter(files)).parents[1]
+    with _project_lock(project_path):
+        return _write_files_locked(files, overwrite=overwrite)
 
 
 def write_metadata_pack(
