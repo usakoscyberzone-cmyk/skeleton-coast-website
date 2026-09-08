@@ -68,6 +68,8 @@ def upgrade_video_metrics_schema(bind) -> None:
         "analytics_start_date": "DATE", "analytics_end_date": "DATE", "title": "TEXT",
         "published_at": "DATETIME", "duration_seconds": "INTEGER", "length_seconds": "INTEGER", "video_type": "VARCHAR(32)", "format": "VARCHAR(32)",
         "topic": "VARCHAR(64)", "average_percentage_viewed": "FLOAT",
+        "thumbnail_wording": "VARCHAR(64)", "hook_type": "VARCHAR(64)",
+        "geography": "VARCHAR(64)", "is_follow_up": "BOOLEAN",
         "subscriber_conversion_rate": "FLOAT", "returning_viewers": "INTEGER",
         "retention_json": "TEXT", "views_1h": "INTEGER", "views_24h": "INTEGER", "views_7d": "INTEGER",
     }
