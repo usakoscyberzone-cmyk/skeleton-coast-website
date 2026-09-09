@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
+from ..config import require_master_project_folder
 from ..db import get_session
 from ..models import Project
 from ..services.asset_generator import (
@@ -217,8 +217,7 @@ class PackagingReadPayload(PackagingPayload):
     revision: str
 
 
-def _registered_project_path(project: Project) -> Path:
-    master = Path(get_settings().master_project_folder)
+def _registered_project_path(project: Project, master: Path) -> Path:
     registered = Path(project.path)
     if (
         not master.is_absolute()
@@ -251,12 +250,13 @@ def generate_assets(
     project_id: int,
     payload: AssetGenerationPayload,
     session: Session = Depends(get_session),
+    master: Path = Depends(require_master_project_folder),
 ) -> dict[str, list[str]]:
     project = session.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     try:
-        project_path = _registered_project_path(project)
+        project_path = _registered_project_path(project, master)
         paths = generate_asset_pack(
             project_path,
             MetadataPack(**payload.metadata.model_dump()),
@@ -293,10 +293,11 @@ def register_thumbnail(
     project_id: int,
     payload: ThumbnailPayload,
     session: Session = Depends(get_session),
+    master: Path = Depends(require_master_project_folder),
 ) -> dict[str, str]:
     project = _project_or_404(project_id, session)
     try:
-        project_path = _registered_project_path(project)
+        project_path = _registered_project_path(project, master)
         path = save_thumbnail_variant(
             project_path, Path(payload.source_png), payload.aspect, payload.label
         )
@@ -316,10 +317,11 @@ def save_packaging(
     project_id: int,
     payload: PackagingSavePayload,
     session: Session = Depends(get_session),
+    master: Path = Depends(require_master_project_folder),
 ) -> dict[str, str]:
     project = _project_or_404(project_id, session)
     try:
-        project_path = _registered_project_path(project)
+        project_path = _registered_project_path(project, master)
         document = PackagingPayload(candidates=payload.candidates).model_dump()
         registration = payload.thumbnail_registration
         path, revision = update_packaging_candidates(
@@ -345,10 +347,11 @@ def save_packaging(
 def get_packaging(
     project_id: int,
     session: Session = Depends(get_session),
+    master: Path = Depends(require_master_project_folder),
 ) -> dict:
     project = _project_or_404(project_id, session)
     try:
-        project_path = _registered_project_path(project)
+        project_path = _registered_project_path(project, master)
         document, revision = read_packaging_snapshot(project_path)
         return PackagingReadPayload(**document, revision=revision).model_dump()
     except UnsafeAssetPathError as exc:

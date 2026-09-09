@@ -132,19 +132,21 @@ def upgrade_recommendations_schema(bind) -> None:
             columns = {column["name"] for column in inspector.get_columns("recommendations")}
             if "is_active" not in columns:
                 connection.exec_driver_sql("ALTER TABLE recommendations ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1")
+            if "channel_id" not in columns:
+                connection.exec_driver_sql("ALTER TABLE recommendations ADD COLUMN channel_id VARCHAR(64)")
             connection.exec_driver_sql("DROP INDEX IF EXISTS uq_active_recommendation_per_video")
-            # Preserve the complete recommendation history, while selecting the
-            # newest deterministic row per video for the new active invariant.
-            connection.exec_driver_sql("UPDATE recommendations SET is_active = 0")
+            # Provenance-free legacy recommendations are never safe to surface.
+            connection.exec_driver_sql("UPDATE recommendations SET is_active = 0 WHERE channel_id IS NULL")
+            connection.exec_driver_sql("UPDATE recommendations SET is_active = 0 WHERE channel_id IS NOT NULL")
             connection.exec_driver_sql(
                 "UPDATE recommendations SET is_active = 1 WHERE id IN ("
                 "SELECT id FROM (SELECT id, ROW_NUMBER() OVER ("
-                "PARTITION BY youtube_video_id ORDER BY created_at DESC, id DESC"
-                ") AS row_number FROM recommendations) WHERE row_number = 1)"
+                "PARTITION BY channel_id, youtube_video_id ORDER BY created_at DESC, id DESC"
+                ") AS row_number FROM recommendations WHERE channel_id IS NOT NULL) WHERE row_number = 1)"
             )
             connection.exec_driver_sql(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_recommendation_per_video "
-                "ON recommendations (youtube_video_id) WHERE is_active = 1"
+                "ON recommendations (channel_id, youtube_video_id) WHERE is_active = 1"
             )
         connection.commit()
     except Exception:

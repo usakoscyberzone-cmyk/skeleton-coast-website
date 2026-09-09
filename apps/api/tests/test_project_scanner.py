@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from app.config import get_settings
+from app.config import get_settings, require_master_project_folder
 from app.models import MediaFile, Project
 from app.main import create_app
 from app.services import project_scanner
@@ -101,7 +101,9 @@ def test_scan_endpoint_persists_projects_and_get_returns_name_order(tmp_path: Pa
 
     database.Base.metadata.create_all(bind=test_engine)
 
-    with TestClient(create_app()) as client:
+    app = create_app()
+    app.dependency_overrides[require_master_project_folder] = lambda: master_folder
+    with TestClient(app) as client:
         first_scan = client.post("/projects/scan")
         second_scan = client.post("/projects/scan")
         listed_projects = client.get("/projects")
@@ -146,7 +148,9 @@ def test_scan_endpoint_ignores_linked_project_outside_master(tmp_path: Path, mon
     monkeypatch.setattr(main_module, "engine", test_engine)
     database.Base.metadata.create_all(bind=test_engine)
 
-    with TestClient(create_app()) as client:
+    app = create_app()
+    app.dependency_overrides[require_master_project_folder] = lambda: master_folder
+    with TestClient(app) as client:
         response = client.post("/projects/scan")
 
     assert response.status_code == 200
@@ -376,7 +380,7 @@ def test_scan_projects_serializes_in_process_scans(tmp_path: Path, monkeypatch):
 
     def invoke_scan() -> None:
         with test_sessions() as session:
-            projects_route.scan_projects(session)
+            projects_route.scan_projects(session, master_folder=tmp_path)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         list(executor.map(lambda _: invoke_scan(), range(2)))
@@ -593,7 +597,9 @@ def test_project_scan_upserts_media_removes_stale_rows_and_exposes_probe_errors(
 
     monkeypatch.setattr(project_scanner, "probe_media", fake_probe)
 
-    with TestClient(create_app()) as client:
+    app = create_app()
+    app.dependency_overrides[require_master_project_folder] = lambda: master_folder
+    with TestClient(app) as client:
         first_scan = client.post("/projects/scan")
         project_id = first_scan.json()[0]["id"]
         first_detail = client.get(f"/projects/{project_id}")

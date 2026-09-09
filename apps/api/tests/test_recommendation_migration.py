@@ -3,7 +3,7 @@ from sqlalchemy import create_engine, inspect, text
 from app.db import upgrade_recommendations_schema
 
 
-def test_legacy_recommendations_migration_keeps_only_newest_row_active_per_video_and_preserves_rows(tmp_path):
+def test_legacy_recommendations_migration_preserves_but_deactivates_rows_without_provenance(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'legacy-recommendations.db'}")
     with engine.begin() as connection:
         connection.exec_driver_sql("CREATE TABLE recommendations (id INTEGER PRIMARY KEY, youtube_video_id TEXT NOT NULL, state TEXT, action TEXT, reason TEXT, confidence TEXT, data_used_json TEXT, created_at DATETIME)")
@@ -15,7 +15,7 @@ def test_legacy_recommendations_migration_keeps_only_newest_row_active_per_video
     upgrade_recommendations_schema(engine)
 
     with engine.connect() as connection:
-        rows = connection.execute(text("SELECT id, youtube_video_id, is_active FROM recommendations ORDER BY id")).all()
+        rows = connection.execute(text("SELECT id, youtube_video_id, channel_id, is_active FROM recommendations ORDER BY id")).all()
         indexes = {row[0] for row in connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='recommendations'")}
-    assert rows == [(1, "video-a", 0), (2, "video-a", 1), (3, "video-b", 1)]
+    assert rows == [(1, "video-a", None, 0), (2, "video-a", None, 0), (3, "video-b", None, 0)]
     assert "uq_active_recommendation_per_video" in indexes

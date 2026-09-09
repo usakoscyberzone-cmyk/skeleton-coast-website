@@ -100,6 +100,7 @@ class Recommendation(Base):
     __tablename__ = "recommendations"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    channel_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     youtube_video_id: Mapped[str] = mapped_column(String(32), index=True)
     state: Mapped[str] = mapped_column(String(16))
     action: Mapped[str] = mapped_column(Text)
@@ -111,7 +112,7 @@ class Recommendation(Base):
 
 
 Index(
-    "uq_active_recommendation_per_video", Recommendation.youtube_video_id,
+    "uq_active_recommendation_per_video", Recommendation.channel_id, Recommendation.youtube_video_id,
     unique=True, sqlite_where=text("is_active = 1"),
 )
 

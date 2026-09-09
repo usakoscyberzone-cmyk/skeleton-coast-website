@@ -1,6 +1,7 @@
 """Channel-only comparison baselines for guarded recommendations."""
 
 from dataclasses import dataclass
+import math
 from statistics import median
 from typing import Iterable, Literal, Protocol
 
@@ -26,7 +27,13 @@ RECOGNIZED_TOPICS = {"fishing", "namibia travel", "angola", "history", "4x4", "c
 
 
 def length_bucket(length_seconds: int | None) -> str:
-    if length_seconds is None:
+    if (
+        length_seconds is None
+        or isinstance(length_seconds, bool)
+        or not isinstance(length_seconds, (int, float))
+        or not math.isfinite(length_seconds)
+        or length_seconds < 0
+    ):
         return "unknown"
     if length_seconds < 60:
         return "<1m"
@@ -52,8 +59,8 @@ def build_channel_baseline(
     ]
     if len(matching) < 5:
         return Baseline(sample_size=len(matching), ctr=None, retention=None, confidence="low")
-    ctrs = [video.ctr for video in matching if video.ctr is not None]
-    retentions = [video.average_percentage_viewed for video in matching if video.average_percentage_viewed is not None]
+    ctrs = [video.ctr for video in matching if _valid_ratio(video.ctr)]
+    retentions = [video.average_percentage_viewed for video in matching if _valid_ratio(video.average_percentage_viewed)]
     return Baseline(
         sample_size=len(matching),
         ctr=median(ctrs) if ctrs else None,
@@ -67,4 +74,13 @@ def _valid_metadata(topic: str | None, format: str | None, bucket: str) -> bool:
         isinstance(topic, str) and topic.casefold() in RECOGNIZED_TOPICS
         and isinstance(format, str) and format.casefold() in RECOGNIZED_FORMATS
         and bucket in {"<1m", "1-5m", "5-15m", "15m+"}
+    )
+
+
+def _valid_ratio(value: float | None) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and 0 <= value <= 1
     )

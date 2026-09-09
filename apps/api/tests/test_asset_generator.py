@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
+from app.config import get_settings, require_master_project_folder
 from app.db import Base, get_session
 from app.main import create_app
 from app.models import Project
@@ -620,6 +620,7 @@ def _asset_client(tmp_path: Path, monkeypatch):
     session.refresh(project)
     app = create_app()
     app.dependency_overrides[get_session] = lambda: session
+    app.dependency_overrides[require_master_project_folder] = lambda: master
     return TestClient(app), session, project, master
 
 

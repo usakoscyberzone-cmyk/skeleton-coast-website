@@ -153,6 +153,11 @@ def _finite_non_negative(value: float | int | None) -> float | None:
     return number if math.isfinite(number) and number >= 0 else None
 
 
+def _finite_ratio(value: float | int | None) -> float | None:
+    number = _finite_non_negative(value)
+    return number if number is not None and number <= 1 else None
+
+
 def _recognized(value: str | None, choices: set[str]) -> str | None:
     if not isinstance(value, str) or value.strip().casefold() not in choices:
         return None
@@ -250,11 +255,11 @@ def _follow_up(video: ChannelVideo) -> str | None:
 
 
 _SPECS = (
-    _PatternSpec("thumbnail_wording", "ctr", "CTR", "thumbnail wording", lambda video: _text(video.thumbnail_wording), lambda video: video.ctr, _normal_scope),
-    _PatternSpec("hook_type", "average_percentage_viewed", "average percentage viewed", "hook types", lambda video: _text(video.hook_type), lambda video: video.average_percentage_viewed, _normal_scope),
+    _PatternSpec("thumbnail_wording", "ctr", "CTR", "thumbnail wording", lambda video: _text(video.thumbnail_wording), lambda video: _finite_ratio(video.ctr), _normal_scope),
+    _PatternSpec("hook_type", "average_percentage_viewed", "average percentage viewed", "hook types", lambda video: _text(video.hook_type), lambda video: _finite_ratio(video.average_percentage_viewed), _normal_scope),
     _PatternSpec("topic_performance", "views", "views", "topics", lambda video: _recognized(video.topic, RECOGNIZED_TOPICS), lambda video: video.views, _topic_scope),
-    _PatternSpec("short_duration", "average_percentage_viewed", "average percentage viewed", "Short durations", _short_duration, lambda video: video.average_percentage_viewed, _short_scope),
-    _PatternSpec("subscriber_conversion", "subscriber_conversion_rate", "subscriber conversion", "formats", lambda video: _recognized(video.format, RECOGNIZED_FORMATS), lambda video: video.subscriber_conversion_rate, _subscriber_scope),
+    _PatternSpec("short_duration", "average_percentage_viewed", "average percentage viewed", "Short durations", _short_duration, lambda video: _finite_ratio(video.average_percentage_viewed), _short_scope),
+    _PatternSpec("subscriber_conversion", "subscriber_conversion_rate", "subscriber conversion", "formats", lambda video: _recognized(video.format, RECOGNIZED_FORMATS), lambda video: _finite_ratio(video.subscriber_conversion_rate), _subscriber_scope),
     _PatternSpec("browse_suggested_response", "views_7d", "7-day views", "traffic-source groups", _traffic_group, lambda video: video.views_7d, _fixed_7d_scope),
     _PatternSpec("geography", "views", "views", "geographies", lambda video: _text(video.geography), lambda video: video.views, _normal_scope),
     _PatternSpec("follow_up_performance", "views_7d", "7-day views", "follow-up types", _follow_up, lambda video: video.views_7d, _long_form_7d_scope),

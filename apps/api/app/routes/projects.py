@@ -5,7 +5,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
+from ..config import require_master_project_folder
 from ..db import begin_immediate_transaction, get_session
 from ..models import MediaFile, Project, ShortPlan
 from ..schemas import MediaFileRead, ProjectDetailRead, ProjectRead, ShortPlanCreate, ShortPlanRead
@@ -21,8 +21,10 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 
 
 @router.post("/scan", response_model=list[ProjectRead])
-def scan_projects(session: Session = Depends(get_session)) -> list[Project]:
-    master_folder = Path(get_settings().master_project_folder)
+def scan_projects(
+    session: Session = Depends(get_session),
+    master_folder: Path = Depends(require_master_project_folder),
+) -> list[Project]:
     begin_immediate_transaction(session)
     projects = scan_master_folder(master_folder)
     persisted_projects = []

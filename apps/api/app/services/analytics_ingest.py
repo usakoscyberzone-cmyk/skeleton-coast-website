@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import date, datetime
 import json
+import math
 from typing import Any
 from dataclasses import asdict, is_dataclass
 
@@ -50,28 +51,28 @@ def normalize_metrics(raw: RawVideoMetrics | dict[str, object]) -> MetricSnapsho
     """Convert API units to one internal convention: ratios are 0..1, gaps are None."""
     if is_dataclass(raw):
         raw = asdict(raw)
-    ctr = raw.get("ctr")
-    if ctr is not None and not 0 <= float(ctr) <= 1:
+    ctr = _bounded_float(raw.get("ctr"), maximum=1)
+    if raw.get("ctr") is not None and ctr is None and _is_finite_number(raw.get("ctr")):
         raise ValueError("CTR must be a normalized ratio between 0 and 1")
     supplied_raw = raw.get("traffic_raw")
     traffic = supplied_raw or raw.get("traffic") or {}
     live_traffic = bool(supplied_raw) or any(key in traffic for key in ("RELATED_VIDEO", "YT_SEARCH", "EXT_URL"))
-    views = _as_int(raw.get("views"))
-    subscribers_gained = _as_int(raw.get("subscribers_gained"))
+    views = _nonnegative_int(raw.get("views"))
+    subscribers_gained = _nonnegative_int(raw.get("subscribers_gained"))
     retention = raw.get("retention")
     return MetricSnapshotInput(
         youtube_video_id=str(raw["video_id"]),
         channel_id=str(raw["channel_id"]) if raw.get("channel_id") else None,
         views=views,
-        impressions=_as_int(raw.get("impressions")),
-        ctr=_as_float(ctr),
-        watch_minutes=_as_float(raw.get("watch_minutes")),
-        avg_view_duration_seconds=_as_float(raw.get("avg_view_duration_seconds")),
+        impressions=_nonnegative_int(raw.get("impressions")),
+        ctr=ctr,
+        watch_minutes=_nonnegative_float(raw.get("watch_minutes")),
+        avg_view_duration_seconds=_nonnegative_float(raw.get("avg_view_duration_seconds")),
         average_percentage_viewed=_percent_to_ratio(raw.get("average_percentage_viewed")),
         subscribers_gained=subscribers_gained,
         subscriber_conversion_rate=(
             subscribers_gained / views
-            if subscribers_gained is not None and views is not None and views > 0
+            if subscribers_gained is not None and views is not None and 0 <= subscribers_gained <= views and views > 0
             else None
         ),
         browse_share=_traffic_share(traffic, "BROWSE") if live_traffic else _normalized_share(traffic, "BROWSE"),
@@ -79,14 +80,14 @@ def normalize_metrics(raw: RawVideoMetrics | dict[str, object]) -> MetricSnapsho
         search_share=_traffic_share(traffic, "YT_SEARCH") if live_traffic else _normalized_share(traffic, "SEARCH"),
         external_share=_traffic_share(traffic, "EXT_URL") if live_traffic else _normalized_share(traffic, "EXTERNAL"),
         shorts_feed_share=_traffic_share(traffic, "SHORTS") if live_traffic else _normalized_share(traffic, "SHORTS"),
-        returning_viewers=_as_int(raw.get("returning_viewers")),
+        returning_viewers=_nonnegative_int(raw.get("returning_viewers")),
         retention=_normalize_retention(retention),
-        views_1h=_as_int(raw.get("views_1h")),
-        views_24h=_as_int(raw.get("views_24h")),
-        views_7d=_as_int(raw.get("views_7d")),
+        views_1h=_nonnegative_int(raw.get("views_1h")),
+        views_24h=_nonnegative_int(raw.get("views_24h")),
+        views_7d=_nonnegative_int(raw.get("views_7d")),
         title=raw.get("title"),
-        duration_seconds=_as_int(raw.get("duration_seconds")),
-        length_seconds=_as_int(raw.get("length_seconds", raw.get("duration_seconds"))),
+        duration_seconds=_nonnegative_int(raw.get("duration_seconds")),
+        length_seconds=_nonnegative_int(raw.get("length_seconds", raw.get("duration_seconds"))),
         video_type=raw.get("video_type"),
         format=raw.get("format", raw.get("video_type")),
         topic=raw.get("topic"),
@@ -94,12 +95,34 @@ def normalize_metrics(raw: RawVideoMetrics | dict[str, object]) -> MetricSnapsho
     )
 
 
-def _as_int(value: Any) -> int | None:
-    return int(value) if value is not None else None
+def _is_finite_number(value: Any) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
-def _as_float(value: Any) -> float | None:
-    return float(value) if value is not None else None
+def _nonnegative_int(value: Any) -> int | None:
+    if not _is_finite_number(value):
+        return None
+    number = float(value)
+    return int(number) if number >= 0 and number.is_integer() else None
+
+
+def _nonnegative_float(value: Any) -> float | None:
+    if not _is_finite_number(value):
+        return None
+    number = float(value)
+    return number if number >= 0 else None
+
+
+def _bounded_float(value: Any, *, minimum: float = 0, maximum: float) -> float | None:
+    if not _is_finite_number(value):
+        return None
+    number = float(value)
+    return number if minimum <= number <= maximum else None
 
 
 def _as_ratio(value: Any) -> float | None:
@@ -112,30 +135,41 @@ def _as_ratio(value: Any) -> float | None:
 
 
 def _percent_to_ratio(value: Any) -> float | None:
-    return None if value is None else float(value) / 100
+    percentage = _bounded_float(value, maximum=100)
+    return percentage / 100 if percentage is not None else None
 
 
 def _traffic_share(traffic: dict[str, Any], source: str) -> float | None:
     if source not in traffic:
         return None
-    total = sum(float(value) for value in traffic.values())
-    return float(traffic[source]) / total if total else None
+    values = [_nonnegative_float(value) for value in traffic.values()]
+    source_value = _nonnegative_float(traffic[source])
+    if source_value is None or any(value is None for value in values):
+        return None
+    total = sum(values)
+    share = source_value / total if total > 0 else None
+    return share if share is None or math.isfinite(share) else None
 
 
 def _normalized_share(traffic: dict[str, Any], source: str) -> float | None:
-    return float(traffic[source]) if source in traffic else None
+    return _bounded_float(traffic.get(source), maximum=1) if source in traffic else None
 
 
 def _normalize_retention(points: Any) -> list[dict[str, float]] | None:
-    if points is None:
+    if not isinstance(points, list) or not points:
         return None
-    return [
-        {
-            "elapsed_ratio": float(point["elapsed_ratio"]),
-            "audience_retention": float(point.get("audienceWatchRatio", point.get("audience_retention"))),
-        }
-        for point in points
-    ]
+    normalized = []
+    for point in points:
+        if not isinstance(point, dict):
+            return None
+        elapsed = _bounded_float(point.get("elapsed_ratio"), maximum=1)
+        audience = _nonnegative_float(
+            point.get("audienceWatchRatio", point.get("audience_retention"))
+        )
+        if elapsed is None or audience is None:
+            return None
+        normalized.append({"elapsed_ratio": elapsed, "audience_retention": audience})
+    return normalized
 
 
 def persist_metric_snapshot(
@@ -154,10 +188,10 @@ def persist_metric_snapshot(
         VideoMetricSnapshot.analytics_start_date == start_date,
         VideoMetricSnapshot.analytics_end_date == end_date,
     ))
-    if existing is not None and existing.channel_id and metric.channel_id and existing.channel_id != metric.channel_id:
+    if existing is not None and existing.channel_id != metric.channel_id:
         raise ValueError("A metric snapshot's channel provenance is immutable")
     update_values = dict(values)
-    update_values["channel_id"] = func.coalesce(VideoMetricSnapshot.channel_id, statement.excluded.channel_id)
+    update_values.pop("channel_id")
     update_values["topic"] = func.coalesce(statement.excluded.topic, VideoMetricSnapshot.topic)
     update_values["ctr"] = func.coalesce(statement.excluded.ctr, VideoMetricSnapshot.ctr)
     update_values["format"] = case(

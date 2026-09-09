@@ -9,7 +9,7 @@ from pathlib import Path
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
+from ..config import get_settings, require_expected_youtube_channel_id
 from ..db import begin_immediate_transaction, get_session
 from ..models import VideoMetricSnapshot
 from ..services.analytics_ingest import normalize_metrics, persist_metric_snapshot
@@ -51,7 +51,32 @@ def normalized_retention_points(payload: str | None) -> list[dict[str, float]] |
         for point in parsed
     ):
         return None
+    if not all(
+        0 <= float(point["elapsed_ratio"]) <= 1
+        and float(point["audience_retention"]) >= 0
+        for point in parsed
+    ):
+        return None
     return parsed
+
+
+def _safe_nonnegative(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return value if math.isfinite(number) and number >= 0 else None
+
+
+def _safe_ratio(value):
+    number = _safe_nonnegative(value)
+    return number if number is not None and number <= 1 else None
+
+
+def _safe_count(value):
+    number = _safe_nonnegative(value)
+    if number is None or not float(number).is_integer():
+        return None
+    return int(number)
 
 
 def _youtube_http_error(error: Exception) -> HTTPException:
@@ -181,8 +206,13 @@ def sync_youtube(
 
 
 @analytics_router.get("/summary")
-def analytics_summary(session: Session = Depends(get_session)) -> dict:
-    rows = list(session.scalars(select(VideoMetricSnapshot)))
+def analytics_summary(
+    session: Session = Depends(get_session),
+    channel_id: str = Depends(require_expected_youtube_channel_id),
+) -> dict:
+    rows = list(session.scalars(
+        select(VideoMetricSnapshot).where(VideoMetricSnapshot.channel_id == channel_id)
+    ))
     # Preserve only the most recent row per video without claiming missing metrics are zero.
     latest = []
     seen = set()
@@ -191,51 +221,64 @@ def analytics_summary(session: Session = Depends(get_session)) -> dict:
             seen.add(row.youtube_video_id)
             latest.append(row)
     def aggregate(name):
-        known=[getattr(row,name) for row in latest if getattr(row,name) is not None]
+        validator = _safe_count if name in {
+            "views", "impressions", "subscribers_gained", "returning_viewers",
+            "views_1h", "views_24h", "views_7d",
+        } else _safe_nonnegative
+        known = [value for row in latest if (value := validator(getattr(row, name))) is not None]
         return {"value": sum(known) if known else None, "coverage": len(known)}
     def weighted(metric_name, denominator_name):
+        metric_validator = _safe_ratio if metric_name in {"ctr", "average_percentage_viewed"} else _safe_nonnegative
         pairs = [
-            (getattr(row, metric_name), getattr(row, denominator_name)) for row in latest
-            if getattr(row, metric_name) is not None and getattr(row, denominator_name) is not None
-            and getattr(row, denominator_name) > 0
+            (metric, denominator) for row in latest
+            if (metric := metric_validator(getattr(row, metric_name))) is not None
+            and (denominator := _safe_count(getattr(row, denominator_name))) is not None
+            and denominator > 0
         ]
         denominator = sum(pair[1] for pair in pairs)
         return {"value": sum(value * weight for value, weight in pairs) / denominator if denominator else None, "coverage": len(pairs)}
     def conversion_rate():
         pairs = [
-            (row.subscribers_gained, row.views) for row in latest
-            if row.subscribers_gained is not None and row.views is not None and row.views > 0
+            (subscribers, views) for row in latest
+            if (subscribers := _safe_count(row.subscribers_gained)) is not None
+            and (views := _safe_count(row.views)) is not None and views > 0
+            and subscribers <= views
         ]
         denominator = sum(pair[1] for pair in pairs)
         return {"value": sum(pair[0] for pair in pairs) / denominator if denominator else None, "coverage": len(pairs)}
     def leader(kind: str):
         candidates = [
-            row for row in latest
-            if row.views is not None and (row.video_type or row.format or "").lower() == kind
+            (row, views) for row in latest
+            if (views := _safe_count(row.views)) is not None
+            and (row.video_type or row.format or "").lower() == kind
         ]
         if not candidates:
             return None
-        row = min(candidates, key=lambda candidate: (-candidate.views, candidate.youtube_video_id))
-        return {"id": row.youtube_video_id, "title": row.title or row.youtube_video_id, "views": row.views}
+        row, views = min(candidates, key=lambda candidate: (-candidate[1], candidate[0].youtube_video_id))
+        return {"id": row.youtube_video_id, "title": row.title or row.youtube_video_id, "views": views}
     # Shares are already normalized per video. Weight each source only by videos
     # that supplied both that source and views; missing source data is not zero.
     traffic_sources = {}
     traffic_source_coverage = {}
     for label, field in (("Browse", "browse_share"), ("Suggested", "suggested_share"), ("Search", "search_share"), ("External", "external_share"), ("Shorts Feed", "shorts_feed_share")):
-        contributing = [row for row in latest if row.views is not None and getattr(row, field) is not None]
+        contributing = [
+            (row, views, share) for row in latest
+            if (views := _safe_count(row.views)) is not None
+            and (share := _safe_ratio(getattr(row, field))) is not None
+        ]
         if contributing:
             traffic_source_coverage[label] = len(contributing)
-            denominator = sum(row.views for row in contributing)
+            denominator = sum(views for _row, views, _share in contributing)
             if denominator:
-                traffic_sources[label] = sum(row.views * getattr(row, field) for row in contributing) / denominator
+                traffic_sources[label] = sum(views * share for _row, views, share in contributing) / denominator
     topics = {}
     for topic in ("Fishing", "Namibia travel", "Angola", "History", "4x4", "Current events"):
-        matching = [row.views for row in latest if row.topic == topic and row.views is not None]
+        matching = [views for row in latest if row.topic == topic and (views := _safe_count(row.views)) is not None]
         topics[topic] = {"value": sum(matching) if matching else None, "coverage": len(matching)}
     videos = [
-        {"id": row.youtube_video_id, "title": row.title or row.youtube_video_id, "views": row.views}
-        for row in sorted(latest, key=lambda item: ((item.views is None), -(item.views or 0), item.youtube_video_id))
-        if row.views is not None
+        {"id": row.youtube_video_id, "title": row.title or row.youtube_video_id, "views": _safe_count(row.views)}
+        for row in sorted(latest, key=lambda item: ((_safe_count(item.views) is None), -(_safe_count(item.views) or 0), item.youtube_video_id))
+        if _safe_count(row.views) is not None
     ]
     retention_videos = [
         {"id": row.youtube_video_id, "title": row.title or row.youtube_video_id}
@@ -259,10 +302,17 @@ def analytics_summary(session: Session = Depends(get_session)) -> dict:
 
 
 @analytics_router.get("/videos/{video_id}/retention")
-def retention_data(video_id: str, session: Session = Depends(get_session)) -> dict:
+def retention_data(
+    video_id: str,
+    session: Session = Depends(get_session),
+    channel_id: str = Depends(require_expected_youtube_channel_id),
+) -> dict:
     snapshot = session.scalar(
         select(VideoMetricSnapshot)
-        .where(VideoMetricSnapshot.youtube_video_id == video_id)
+        .where(
+            VideoMetricSnapshot.channel_id == channel_id,
+            VideoMetricSnapshot.youtube_video_id == video_id,
+        )
         .order_by(VideoMetricSnapshot.captured_at.desc())
     )
     if snapshot is None:

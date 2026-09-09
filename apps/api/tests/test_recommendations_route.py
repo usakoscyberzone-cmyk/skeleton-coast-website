@@ -5,6 +5,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.db import Base, get_session
+from app.config import require_expected_youtube_channel_id
 from app.main import create_app
 from app.models import Recommendation, VideoMetricSnapshot
 
@@ -15,12 +16,13 @@ def _client_with_session(tmp_path):
     session = Session(engine)
     app = create_app()
     app.dependency_overrides[get_session] = lambda: session
+    app.dependency_overrides[require_expected_youtube_channel_id] = lambda: "UC-skeleton"
     return TestClient(app), session
 
 
 def _snapshot(video_id, captured_at, **values):
     defaults = dict(
-        youtube_video_id=video_id, captured_at=captured_at,
+        channel_id="UC-skeleton", youtube_video_id=video_id, captured_at=captured_at,
         analytics_start_date=captured_at.date(), analytics_end_date=captured_at.date(),
         published_at=captured_at.replace(tzinfo=UTC) - timedelta(hours=20),
         topic="Fishing", format="long", length_seconds=600,
